@@ -18,7 +18,9 @@ Each shard is committed to a Merkle root. The manifest records that root, leaf s
 
 ### 4. Place
 
-The client ranks peers deterministically per object and shard. Placement combines rendezvous-style hashing with a capacity bias so fuller peers become less attractive. Peers also carry a labeled failure-domain bucket. Placement prefers unused buckets first, then falls back when the swarm does not have enough independent domains.
+The client ranks peers deterministically per object and shard. Placement combines rendezvous-style hashing, failure-domain diversity, capacity pressure, repair headroom pressure, audit failure rate, consecutive failures, and prior repair success into one score. Peers also carry a labeled failure-domain bucket. Placement prefers unused buckets first, then falls back when the swarm does not have enough independent domains.
+
+Admission control runs before scoring. A peer must be online, have enough regular or repair capacity for the requested write purpose, and stay below the configured consecutive-failure and failure-rate thresholds.
 
 ### 5. Audit
 
@@ -30,7 +32,7 @@ The client requests shard descriptors from the manifest, verifies shard checksum
 
 ### 7. Repair
 
-Repair starts with an audit pass. Failed shard placements are treated as unavailable. If at least `k` shards can still be fetched, Kryden reconstructs the encrypted object, re-runs erasure coding deterministically, and stores replacement shard indexes on online peers. Repair placement uses peer repair headroom and avoids already-used failure domains where possible. The content key is not needed for repair.
+Repair starts with an audit pass. Failed shard placements are treated as unavailable. If at least `k` shards can still be fetched, Kryden reconstructs the encrypted object, re-runs erasure coding deterministically, and stores replacement shard indexes on online peers. Repair placement uses peer repair headroom, avoids already-used failure domains where possible, and discounts peers with poor audit history. The content key is not needed for repair.
 
 ### 8. Schedule
 

@@ -155,6 +155,21 @@ export class PeerStore {
     };
   }
 
+  corruptShard(objectId: string, shardIndex: number): void {
+    const stored = this.shards.get(shardKey(objectId, shardIndex));
+    if (!stored) {
+      throw new Error(`Peer ${this.id} does not store shard ${shardIndex} for ${objectId}`);
+    }
+
+    if (stored.shard.data.length === 0) {
+      throw new Error(`Shard ${shardIndex} for ${objectId} is empty`);
+    }
+
+    for (let index = 0; index < stored.shard.data.length; index += 1) {
+      stored.shard.data[index] = stored.shard.data[index] ^ 0xff;
+    }
+  }
+
   respondToAudit(challenge: StorageAuditChallenge, descriptor: ShardDescriptor): StorageAuditProof | undefined {
     if (!this.online) {
       return undefined;

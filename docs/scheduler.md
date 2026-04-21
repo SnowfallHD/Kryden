@@ -46,9 +46,24 @@ The test suite covers this with a child process that opens the SQLite database, 
 - A failed audit increments `auditsFailed`, increments `consecutiveFailures`, and records `lastError`.
 - A successful repair increments `repairedShards` on the replacement peer.
 
+## Placement Feedback
+
+Before every run, the scheduler loads persisted `peer_health` and gives it to the swarm placement layer. Repair selection then uses the latest audit and repair history instead of only static peer labels. Chronically failing peers can be denied admission, and degraded peers that remain admitted receive a worse placement score.
+
+## Anti-Thrash Controls
+
+The scheduler has bounded repair behavior:
+
+- `maxRepairsPerRun` caps how many shard placements can be repaired in one scheduler pass. Excess failed placements are reported as deferred repair failures.
+- `objectCooldownMs` suppresses an object for a short window after successful repair so the scheduler does not immediately churn it again.
+- `degradedBackoffBaseMs` and `degradedBackoffMaxMs` apply exponential backoff when an object remains degraded or repair work is deferred.
+- Suppressed objects are skipped by `getEligibleTrackedObjects()` until their `nextEligibleAt` time.
+
+The suppression state lives on the `manifests` row next to the latest committed manifest: `consecutive_degraded_runs`, `next_eligible_at`, `last_scheduler_run_at`, and `last_repair_at`.
+
 ## Current Limits
 
 - Scheduler state is durable SQLite, but shard payloads are still in memory.
 - A restarted process can reload state, but cannot repair until shard persistence or real peer transport exists.
-- Timer errors are swallowed so later intervals can try again; production observability needs structured logging.
+- Timer errors are swallowed so later intervals can try again; production observability still needs structured logging.
 - Audit randomness is local; production should anchor challenge selection to public or committed randomness.

@@ -14,6 +14,8 @@
 - **Repair capacity reservation:** Regular writes cannot consume the headroom reserved for repair.
 - **Manifest transition atomicity:** Scheduler-driven manifest updates, placement changes, peer health, repair events, and run history commit in one SQLite transaction.
 - **Restart after interruption:** Stale running transitions are abandoned on restart before the next repair cycle commits from the last durable manifest.
+- **Quality-aware placement:** Peers with poor audit history or repeated failures are penalized or denied admission before receiving new shards.
+- **Repair-thrash reduction:** Repair caps, object cooldown, and degraded-object backoff prevent one unstable object from monopolizing maintenance cycles.
 
 ## Not Yet Protected
 
@@ -26,6 +28,7 @@
 - **State confidentiality:** Scheduler SQLite state includes manifests, placements, repair events, and peer health; production needs access controls around the database file.
 - **Failure-domain truthfulness:** Buckets are self-reported simulator labels. Production needs signed, policy-checked, and abuse-resistant topology claims.
 - **Shard side effects before commit:** A killed local repair can leave extra in-memory shard copies on replacement peers even though the manifest is not updated. Production durable shard stores need garbage collection for uncommitted writes.
+- **Suppression tuning:** Overly aggressive cooldown or backoff settings can delay repair under real degradation.
 - **Traffic analysis:** The local simulator does not hide access patterns.
 - **Malicious clients:** Quotas, abuse controls, and spam resistance are not implemented.
 

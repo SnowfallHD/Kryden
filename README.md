@@ -56,6 +56,7 @@ npx tsx src/cli.ts simulate-scheduler --state tmp/kryden-scheduler-state.sqlite
 
 This writes tracked objects, peer health, shard placements, repair events, transitions, and scheduler run history to SQLite.
 Use `--failure-domains`, `--reserved-bytes`, and `--repair-headroom-bytes` to exercise correlated-risk and capacity-pressure scenarios.
+Use `--max-repairs-per-run`, `--object-cooldown-ms`, and `--degraded-backoff-base-ms` to exercise anti-thrash behavior.
 
 ## Architecture
 

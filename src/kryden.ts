@@ -3,7 +3,7 @@ import { decodeErasure, encodeErasure, type ErasureConfig } from "./erasure/reed
 import type { ClientSecret, StoredObjectManifest } from "./storage/manifest.js";
 import type { StorageAuditResult } from "./swarm/audit.js";
 import type { LocalSwarm } from "./swarm/localSwarm.js";
-import type { RepairReport } from "./swarm/repair.js";
+import type { RepairOptions, RepairReport } from "./swarm/repair.js";
 
 export interface KrydenPutResult {
   manifest: StoredObjectManifest;
@@ -46,8 +46,12 @@ export class KrydenClient {
     return this.swarm.auditObject(manifest, sampleCount);
   }
 
-  repair(manifest: StoredObjectManifest, sampleCount = 3): RepairReport<StoredObjectManifest> {
-    return this.swarm.repairObject(manifest, sampleCount);
+  repair(
+    manifest: StoredObjectManifest,
+    sampleCount = 3,
+    options: RepairOptions = {}
+  ): RepairReport<StoredObjectManifest> {
+    return this.swarm.repairObject(manifest, sampleCount, options);
   }
 }
 
@@ -57,6 +61,6 @@ export type { LocalSwarmOptions } from "./swarm/localSwarm.js";
 export { createPeerIdentity } from "./swarm/identity.js";
 export { createStorageAuditChallenge, verifyStorageAuditProof } from "./swarm/audit.js";
 export type { LocalPeerRecord } from "./swarm/peer.js";
-export type { RepairReport, ShardRepair, ShardRepairFailure } from "./swarm/repair.js";
+export type { RepairOptions, RepairReport, ShardRepair, ShardRepairFailure } from "./swarm/repair.js";
 export { decodeErasure, encodeErasure } from "./erasure/reedSolomon.js";
 export { decryptPayload, encryptPayload } from "./crypto/envelope.js";

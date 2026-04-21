@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { KrydenClient, createLocalSwarm } from "../src/kryden.js";
 import { BackgroundRepairScheduler } from "../src/scheduler/backgroundRepairScheduler.js";
 import { SQLiteStateStore } from "../src/state/store.js";
+import { rankPeersForShard } from "../src/swarm/placement.js";
 
 describe("background audit and repair scheduler", () => {
   it("repairs tracked objects and persists peer health", async () => {
@@ -158,6 +159,37 @@ describe("background audit and repair scheduler", () => {
     expect(afterCommit.objects[stored.manifest.contentId].manifest.shards[0].peerId).not.toBe(failedPeerId);
   });
 
+  it("rolls back repair state when durable commit fails mid-transaction", async () => {
+    const statePath = await createStatePath();
+    const swarm = createLocalSwarm(8, 1024 * 1024);
+    const client = new KrydenClient(swarm);
+    const store = new SQLiteStateStore(statePath);
+    const scheduler = new BackgroundRepairScheduler(swarm, store, { sampleCount: 2 });
+    const stored = client.put(randomBytes(32 * 1024), { dataShards: 4, parityShards: 2 });
+    const failedPeerId = stored.manifest.shards[0].peerId;
+
+    await scheduler.trackObject(stored.manifest);
+    swarm.setPeerOnline(failedPeerId, false);
+    store.injectCommitFaultOnce("database disk full during repair commit");
+
+    await expect(scheduler.runOnce(new Date("2026-04-21T08:00:00.000Z"))).rejects.toThrow(/disk full/i);
+    const state = await store.load();
+    const transitions = Object.values(state.transitions);
+    const db = new DatabaseSync(statePath);
+    const repairEventCount = db.prepare("SELECT COUNT(*) AS count FROM repair_events").get() as {
+      count: number;
+    };
+    db.close();
+
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0].status).toBe("abandoned");
+    expect(state.runs).toHaveLength(0);
+    expect(repairEventCount.count).toBe(0);
+    expect(state.objects[stored.manifest.contentId].manifest).toEqual(stored.manifest);
+    expect(state.peers[failedPeerId].auditsFailed).toBe(0);
+    expect(state.peers[failedPeerId].consecutiveFailures).toBe(0);
+  });
+
   it("marks failed transitions abandoned without changing tracked manifests", async () => {
     const statePath = await createStatePath();
     const swarm = createLocalSwarm(6, 1024 * 1024);
@@ -240,6 +272,147 @@ describe("background audit and repair scheduler", () => {
     expect(transitions.some((transition) => transition.status === "committed")).toBe(true);
     expect(transitions.every((transition) => transition.status !== "running")).toBe(true);
     expect(recoveredState.runs).toHaveLength(1);
+  });
+
+  it("remembers repeated invalid proofs from the same peer and excludes it from placement", async () => {
+    const statePath = await createStatePath();
+    const swarm = createLocalSwarm(8, 1024 * 1024, { failureDomainCount: 8 });
+    const client = new KrydenClient(swarm);
+    const store = new SQLiteStateStore(statePath);
+    const stored = client.put(randomBytes(32 * 1024), { dataShards: 4, parityShards: 2 });
+    const corruptedDescriptor = stored.manifest.shards[0];
+    const scheduler = new BackgroundRepairScheduler(swarm, store, {
+      sampleCount: corruptedDescriptor.merkleLeafCount ?? 1,
+      maxRepairsPerRun: 0,
+      degradedBackoffBaseMs: 0,
+      degradedBackoffMaxMs: 0
+    });
+
+    await scheduler.trackObject(stored.manifest);
+    swarm.corruptShard(
+      corruptedDescriptor.peerId,
+      stored.manifest.contentId,
+      corruptedDescriptor.index
+    );
+
+    for (let runIndex = 0; runIndex < 6; runIndex += 1) {
+      await scheduler.runOnce(new Date(`2026-04-21T08:0${runIndex}:00.000Z`));
+    }
+
+    const state = await store.load();
+    const corruptPeerHealth = state.peers[corruptedDescriptor.peerId];
+    const ranked = rankPeersForShard(
+      "new-object-after-invalid-proofs",
+      0,
+      swarm.peers,
+      corruptedDescriptor.size,
+      { peerHealth: new Map(Object.entries(state.peers)) }
+    );
+
+    expect(corruptPeerHealth.auditsFailed).toBe(6);
+    expect(corruptPeerHealth.consecutiveFailures).toBe(6);
+    expect(state.runs).toHaveLength(6);
+    expect(state.runs.every((run) => run.auditsFailed === 1)).toBe(true);
+    expect(ranked.some((peer) => peer.id === corruptedDescriptor.peerId)).toBe(false);
+  });
+
+  it("enforces a per-run repair cap and backs off deferred degraded objects", async () => {
+    const statePath = await createStatePath();
+    const swarm = createLocalSwarm(10, 1024 * 1024);
+    const client = new KrydenClient(swarm);
+    const store = new SQLiteStateStore(statePath);
+    const scheduler = new BackgroundRepairScheduler(swarm, store, {
+      sampleCount: 2,
+      maxRepairsPerRun: 1,
+      degradedBackoffBaseMs: 60_000,
+      degradedBackoffMaxMs: 60_000,
+      objectCooldownMs: 10_000
+    });
+    const stored = client.put(randomBytes(64 * 1024), { dataShards: 4, parityShards: 2 });
+
+    await scheduler.trackObject(stored.manifest);
+    for (const descriptor of stored.manifest.shards.slice(0, 2)) {
+      swarm.setPeerOnline(descriptor.peerId, false);
+    }
+
+    const summary = await scheduler.runOnce(new Date("2026-04-21T08:00:00.000Z"));
+    const state = await store.load();
+    const tracked = state.objects[stored.manifest.contentId];
+
+    expect(summary.run.repairsSucceeded).toBe(1);
+    expect(summary.run.repairsFailed).toBe(1);
+    expect(summary.run.objects[0].failedRepairs[0].reason).toMatch(/cap/i);
+    expect(tracked.consecutiveDegradedRuns).toBe(1);
+    expect(tracked.nextEligibleAt).toBe("2026-04-21T08:01:00.000Z");
+  });
+
+  it("persists degraded backoff across restart during consecutive failed cycles", async () => {
+    const statePath = await createStatePath();
+    const swarm = createLocalSwarm(8, 1024 * 1024);
+    const client = new KrydenClient(swarm);
+    const store = new SQLiteStateStore(statePath);
+    const scheduler = new BackgroundRepairScheduler(swarm, store, {
+      sampleCount: 2,
+      maxRepairsPerRun: 0,
+      degradedBackoffBaseMs: 60_000,
+      degradedBackoffMaxMs: 120_000
+    });
+    const stored = client.put(randomBytes(32 * 1024), { dataShards: 4, parityShards: 2 });
+    const failedPeerId = stored.manifest.shards[0].peerId;
+
+    await scheduler.trackObject(stored.manifest);
+    swarm.setPeerOnline(failedPeerId, false);
+
+    const first = await scheduler.runOnce(new Date("2026-04-21T08:00:00.000Z"));
+    const firstState = await store.load();
+    store.close();
+
+    const restartStore = new SQLiteStateStore(statePath);
+    const restartedScheduler = new BackgroundRepairScheduler(swarm, restartStore, {
+      sampleCount: 2,
+      maxRepairsPerRun: 0,
+      degradedBackoffBaseMs: 60_000,
+      degradedBackoffMaxMs: 120_000
+    });
+    const skipped = await restartedScheduler.runOnce(new Date("2026-04-21T08:00:30.000Z"));
+    const second = await restartedScheduler.runOnce(new Date("2026-04-21T08:01:00.000Z"));
+    const finalState = await restartStore.load();
+    const tracked = finalState.objects[stored.manifest.contentId];
+
+    expect(first.run.repairsFailed).toBe(1);
+    expect(firstState.objects[stored.manifest.contentId].consecutiveDegradedRuns).toBe(1);
+    expect(firstState.objects[stored.manifest.contentId].nextEligibleAt).toBe("2026-04-21T08:01:00.000Z");
+    expect(skipped.run.objectsAudited).toBe(0);
+    expect(second.run.repairsFailed).toBe(1);
+    expect(tracked.consecutiveDegradedRuns).toBe(2);
+    expect(tracked.nextEligibleAt).toBe("2026-04-21T08:03:00.000Z");
+  });
+
+  it("suppresses objects during cooldown windows", async () => {
+    const statePath = await createStatePath();
+    const swarm = createLocalSwarm(8, 1024 * 1024);
+    const client = new KrydenClient(swarm);
+    const store = new SQLiteStateStore(statePath);
+    const scheduler = new BackgroundRepairScheduler(swarm, store, {
+      sampleCount: 2,
+      objectCooldownMs: 60_000
+    });
+    const stored = client.put(randomBytes(32 * 1024), { dataShards: 4, parityShards: 2 });
+
+    await scheduler.trackObject(stored.manifest);
+    swarm.setPeerOnline(stored.manifest.shards[0].peerId, false);
+
+    const first = await scheduler.runOnce(new Date("2026-04-21T08:00:00.000Z"));
+    const second = await scheduler.runOnce(new Date("2026-04-21T08:00:30.000Z"));
+    const third = await scheduler.runOnce(new Date("2026-04-21T08:01:01.000Z"));
+    const state = await store.load();
+
+    expect(first.run.objectsAudited).toBe(1);
+    expect(first.run.repairsSucceeded).toBe(1);
+    expect(second.run.objectsAudited).toBe(0);
+    expect(second.run.repairsSucceeded).toBe(0);
+    expect(third.run.objectsAudited).toBe(1);
+    expect(state.objects[stored.manifest.contentId].nextEligibleAt).toBeUndefined();
   });
 });
 

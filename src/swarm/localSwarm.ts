@@ -9,8 +9,8 @@ import {
 } from "./audit.js";
 import { PeerStore } from "./peer.js";
 import type { LocalPeerRecord } from "./peer.js";
-import { rankPeersForShard } from "./placement.js";
-import type { RepairReport, ShardRepair, ShardRepairFailure } from "./repair.js";
+import { rankPeersForShard, type PeerPlacementStats } from "./placement.js";
+import type { RepairOptions, RepairReport, ShardRepair, ShardRepairFailure } from "./repair.js";
 
 export interface LocalSwarmOptions {
   failureDomainCount?: number;
@@ -20,6 +20,7 @@ export interface LocalSwarmOptions {
 
 export class LocalSwarm {
   readonly peers: PeerStore[];
+  private readonly peerPlacementHealth = new Map<string, PeerPlacementStats>();
 
   constructor(peers: readonly PeerStore[]) {
     if (peers.length === 0) {
@@ -32,6 +33,21 @@ export class LocalSwarm {
     }
 
     this.peers = [...peers];
+  }
+
+  setPeerPlacementHealth(
+    health: ReadonlyMap<string, PeerPlacementStats> | Record<string, PeerPlacementStats>
+  ): void {
+    this.peerPlacementHealth.clear();
+    const entries = health instanceof Map ? health.entries() : Object.entries(health);
+    for (const [peerId, stats] of entries) {
+      this.peerPlacementHealth.set(peerId, {
+        auditsPassed: stats.auditsPassed,
+        auditsFailed: stats.auditsFailed,
+        consecutiveFailures: stats.consecutiveFailures,
+        repairedShards: stats.repairedShards
+      });
+    }
   }
 
   storeObjectShards(objectId: string, shards: readonly EncodedShard[]): ShardDescriptor[] {
@@ -48,14 +64,16 @@ export class LocalSwarm {
         {
           excludedPeerIds: usedPeerIds,
           avoidedFailureDomains: usedFailureDomains,
-          purpose: "regular"
+          purpose: "regular",
+          peerHealth: this.peerPlacementHealth
         }
       );
 
       if (candidates.length === 0) {
         candidates = rankPeersForShard(objectId, shard.index, this.peers, shard.data.length, {
           avoidedFailureDomains: usedFailureDomains,
-          purpose: "regular"
+          purpose: "regular",
+          peerHealth: this.peerPlacementHealth
         });
       }
 
@@ -99,6 +117,15 @@ export class LocalSwarm {
     }
 
     peer.online = online;
+  }
+
+  corruptShard(peerId: string, objectId: string, shardIndex: number): void {
+    const peer = this.peers.find((candidate) => candidate.id === peerId);
+    if (!peer) {
+      throw new Error(`Unknown peer ${peerId}`);
+    }
+
+    peer.corruptShard(objectId, shardIndex);
   }
 
   offlinePeerIds(): string[] {
@@ -150,7 +177,19 @@ export class LocalSwarm {
     });
   }
 
-  repairObject(manifest: StoredObjectManifest, sampleCount = 3): RepairReport<StoredObjectManifest> {
+  repairObject(
+    manifest: StoredObjectManifest,
+    sampleCount = 3,
+    options: RepairOptions = {}
+  ): RepairReport<StoredObjectManifest> {
+    const maxRepairs = options.maxRepairs ?? Number.POSITIVE_INFINITY;
+    if (
+      maxRepairs !== Number.POSITIVE_INFINITY &&
+      (!Number.isInteger(maxRepairs) || maxRepairs < 0)
+    ) {
+      throw new Error("maxRepairs must be a non-negative integer");
+    }
+
     const audits = this.auditObject(manifest, sampleCount);
     const failedAudits = audits.filter((audit) => !audit.ok);
     const healthyShards = audits.length - failedAudits.length;
@@ -195,6 +234,15 @@ export class LocalSwarm {
     const failed: ShardRepairFailure[] = [];
 
     for (const audit of failedAudits) {
+      if (repaired.length >= maxRepairs) {
+        failed.push({
+          shardIndex: audit.shardIndex,
+          peerId: audit.peerId,
+          reason: "Repair deferred by per-run cap"
+        });
+        continue;
+      }
+
       const shard = encoded.shards.find((candidate) => candidate.index === audit.shardIndex);
       const descriptorIndex = updatedManifest.shards.findIndex(
         (candidate) => candidate.index === audit.shardIndex
@@ -282,7 +330,8 @@ export class LocalSwarm {
       {
         excludedPeerIds: preferredAvoidPeerIds,
         avoidedFailureDomains: preferredAvoidFailureDomains,
-        purpose: "repair"
+        purpose: "repair",
+        peerHealth: this.peerPlacementHealth
       }
     )[0];
 
@@ -298,7 +347,8 @@ export class LocalSwarm {
       {
         excludedPeerIds: new Set([oldPeerId]),
         avoidedFailureDomains: preferredAvoidFailureDomains,
-        purpose: "repair"
+        purpose: "repair",
+        peerHealth: this.peerPlacementHealth
       }
     )[0];
   }

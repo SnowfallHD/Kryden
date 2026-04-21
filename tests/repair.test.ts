@@ -62,4 +62,35 @@ describe("repair scheduler", () => {
     expect(postRepairAudits.every((audit) => audit.ok)).toBe(true);
     expect(recovered.equals(plaintext)).toBe(true);
   });
+
+  it("fails cleanly when no online peer has enough repair headroom", () => {
+    const swarm = createLocalSwarm(7, 64 * 1024, {
+      failureDomainCount: 7,
+      repairHeadroomBytes: 1024
+    });
+    const client = new KrydenClient(swarm);
+    const stored = client.put(randomBytes(32 * 1024), { dataShards: 4, parityShards: 2 });
+    const failedDescriptor = stored.manifest.shards[0];
+    const shardSize = failedDescriptor.size;
+
+    for (const peer of swarm.peers.filter((candidate) => candidate.id !== failedDescriptor.peerId)) {
+      const fillerSize = peer.repairFreeBytes - shardSize + 1;
+      if (fillerSize > 0) {
+        peer.store(`headroom-filler-${peer.id}`, {
+          index: 0,
+          checksum: "unused",
+          data: Buffer.alloc(fillerSize)
+        }, "repair");
+      }
+    }
+
+    swarm.setPeerOnline(failedDescriptor.peerId, false);
+    const report = client.repair(stored.manifest, 2);
+
+    expect(report.repaired).toHaveLength(0);
+    expect(report.failed).toHaveLength(1);
+    expect(report.failed[0].peerId).toBe(failedDescriptor.peerId);
+    expect(report.failed[0].reason).toMatch(/free capacity/i);
+    expect(report.updatedManifest).toEqual(stored.manifest);
+  });
 });

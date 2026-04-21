@@ -13,6 +13,10 @@ export interface TrackedObjectRecord {
   manifest: StoredObjectManifest;
   registeredAt: string;
   updatedAt: string;
+  consecutiveDegradedRuns: number;
+  nextEligibleAt?: string;
+  lastSchedulerRunAt?: string;
+  lastRepairAt?: string;
 }
 
 export interface PeerHealthRecord {
@@ -62,6 +66,12 @@ export interface StateTransitionRecord {
   error?: string;
 }
 
+export interface SchedulerMaintenancePolicy {
+  objectCooldownMs: number;
+  degradedBackoffBaseMs: number;
+  degradedBackoffMaxMs: number;
+}
+
 export interface KrydenStateSnapshot {
   version: 1;
   objects: Record<string, TrackedObjectRecord>;
@@ -75,6 +85,10 @@ interface ManifestRow {
   manifest_json: string;
   registered_at: string;
   updated_at: string;
+  consecutive_degraded_runs: number;
+  next_eligible_at: string | null;
+  last_scheduler_run_at: string | null;
+  last_repair_at: string | null;
 }
 
 interface PeerHealthRow {
@@ -117,6 +131,7 @@ export class SQLiteStateStore {
   private readonly maxRunHistory: number;
   private readonly db: DatabaseSync;
   private transactionDepth = 0;
+  private commitFaultMessage: string | undefined;
 
   constructor(path: string, maxRunHistory = 100) {
     if (!path) {
@@ -148,7 +163,11 @@ export class SQLiteStateStore {
       contentId: manifest.contentId,
       manifest: cloneManifest(manifest),
       registeredAt: existing?.registeredAt ?? timestamp,
-      updatedAt: timestamp
+      updatedAt: timestamp,
+      consecutiveDegradedRuns: existing?.consecutiveDegradedRuns ?? 0,
+      nextEligibleAt: existing?.nextEligibleAt,
+      lastSchedulerRunAt: existing?.lastSchedulerRunAt,
+      lastRepairAt: existing?.lastRepairAt
     };
   }
 
@@ -160,6 +179,14 @@ export class SQLiteStateStore {
 
   async getTrackedObjects(): Promise<TrackedObjectRecord[]> {
     return this.getTrackedObjectsSync();
+  }
+
+  async getEligibleTrackedObjects(now = new Date()): Promise<TrackedObjectRecord[]> {
+    return this.db.prepare(`
+      SELECT * FROM manifests
+      WHERE next_eligible_at IS NULL OR next_eligible_at <= ?
+      ORDER BY registered_at ASC, content_id ASC
+    `).all(now.toISOString()).map((row) => trackedObjectFromRow(row as unknown as ManifestRow));
   }
 
   async beginSchedulerRun(objectIds: readonly string[], startedAt = new Date()): Promise<StateTransitionRecord> {
@@ -189,7 +216,8 @@ export class SQLiteStateStore {
     reports: readonly RepairReport<StoredObjectManifest>[],
     startedAt: Date,
     completedAt: Date,
-    peerRecords: readonly LocalPeerRecord[] = []
+    peerRecords: readonly LocalPeerRecord[] = [],
+    maintenancePolicy: SchedulerMaintenancePolicy = DEFAULT_MAINTENANCE_POLICY
   ): Promise<SchedulerRunRecord> {
     const transition = this.getTransitionSync(transitionId);
     if (!transition) {
@@ -213,9 +241,17 @@ export class SQLiteStateStore {
           existing?.registeredAt ?? startedAt.toISOString(),
           completedAt.toISOString()
         );
+        this.updateObjectMaintenance(
+          report,
+          existing,
+          startedAt,
+          completedAt,
+          maintenancePolicy
+        );
         this.updatePeerHealth(report.audits, report.repaired, completedAt);
       }
 
+      this.throwInjectedCommitFault();
       this.insertSchedulerRun(run);
       this.insertRepairEvents(run);
       this.trimRunHistory();
@@ -278,17 +314,29 @@ export class SQLiteStateStore {
     }));
   }
 
+  injectCommitFaultOnce(message = "Injected SQLite commit failure"): void {
+    this.commitFaultMessage = message;
+  }
+
   async recordSchedulerRun(
     reports: readonly RepairReport<StoredObjectManifest>[],
     startedAt: Date,
     completedAt: Date,
-    peerRecords: readonly LocalPeerRecord[] = []
+    peerRecords: readonly LocalPeerRecord[] = [],
+    maintenancePolicy: SchedulerMaintenancePolicy = DEFAULT_MAINTENANCE_POLICY
   ): Promise<SchedulerRunRecord> {
     const transition = await this.beginSchedulerRun(
       reports.map((report) => report.updatedManifest.contentId),
       startedAt
     );
-    return this.commitSchedulerRun(transition.transitionId, reports, startedAt, completedAt, peerRecords);
+    return this.commitSchedulerRun(
+      transition.transitionId,
+      reports,
+      startedAt,
+      completedAt,
+      peerRecords,
+      maintenancePolicy
+    );
   }
 
   close(): void {
@@ -332,7 +380,11 @@ export class SQLiteStateStore {
         content_id TEXT PRIMARY KEY,
         manifest_json TEXT NOT NULL,
         registered_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        consecutive_degraded_runs INTEGER NOT NULL DEFAULT 0,
+        next_eligible_at TEXT,
+        last_scheduler_run_at TEXT,
+        last_repair_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS shard_placements (
@@ -387,6 +439,7 @@ export class SQLiteStateStore {
       );
     `);
     this.ensurePeerColumns();
+    this.ensureManifestColumns();
   }
 
   private ensurePeerColumns(): void {
@@ -407,6 +460,24 @@ export class SQLiteStateStore {
     for (const [name, definition] of columns) {
       if (!existing.has(name)) {
         this.db.exec(`ALTER TABLE peers ADD COLUMN ${name} ${definition}`);
+      }
+    }
+  }
+
+  private ensureManifestColumns(): void {
+    const existing = new Set(
+      this.db.prepare("PRAGMA table_info(manifests)").all().map((row) => (row as { name: string }).name)
+    );
+    const columns: Array<[string, string]> = [
+      ["consecutive_degraded_runs", "INTEGER NOT NULL DEFAULT 0"],
+      ["next_eligible_at", "TEXT"],
+      ["last_scheduler_run_at", "TEXT"],
+      ["last_repair_at", "TEXT"]
+    ];
+
+    for (const [name, definition] of columns) {
+      if (!existing.has(name)) {
+        this.db.exec(`ALTER TABLE manifests ADD COLUMN ${name} ${definition}`);
       }
     }
   }
@@ -557,6 +628,46 @@ export class SQLiteStateStore {
       VALUES (?)
       ON CONFLICT(peer_id) DO NOTHING
     `).run(peer.peerId);
+  }
+
+  private updateObjectMaintenance(
+    report: RepairReport<StoredObjectManifest>,
+    existing: TrackedObjectRecord | undefined,
+    startedAt: Date,
+    completedAt: Date,
+    policy: SchedulerMaintenancePolicy
+  ): void {
+    const hasRepairFailures = report.failed.length > 0;
+    const repaired = report.repaired.length > 0;
+    const consecutiveDegradedRuns = hasRepairFailures
+      ? (existing?.consecutiveDegradedRuns ?? 0) + 1
+      : 0;
+    const cooldownMs = hasRepairFailures
+      ? Math.min(
+          policy.degradedBackoffMaxMs,
+          policy.degradedBackoffBaseMs * 2 ** Math.max(0, consecutiveDegradedRuns - 1)
+        )
+      : repaired
+        ? policy.objectCooldownMs
+        : 0;
+    const nextEligibleAt =
+      cooldownMs > 0 ? new Date(completedAt.getTime() + cooldownMs).toISOString() : null;
+    const lastRepairAt = repaired ? completedAt.toISOString() : existing?.lastRepairAt ?? null;
+
+    this.db.prepare(`
+      UPDATE manifests
+      SET consecutive_degraded_runs = ?,
+        next_eligible_at = ?,
+        last_scheduler_run_at = ?,
+        last_repair_at = ?
+      WHERE content_id = ?
+    `).run(
+      consecutiveDegradedRuns,
+      nextEligibleAt,
+      startedAt.toISOString(),
+      lastRepairAt,
+      report.updatedManifest.contentId
+    );
   }
 
   private insertShardPlacement(contentId: string, descriptor: ShardDescriptor): void {
@@ -734,6 +845,16 @@ export class SQLiteStateStore {
       this.transactionDepth -= 1;
     }
   }
+
+  private throwInjectedCommitFault(): void {
+    if (!this.commitFaultMessage) {
+      return;
+    }
+
+    const message = this.commitFaultMessage;
+    this.commitFaultMessage = undefined;
+    throw new Error(message);
+  }
 }
 
 export function emptyState(): KrydenStateSnapshot {
@@ -745,6 +866,12 @@ export function emptyState(): KrydenStateSnapshot {
     transitions: {}
   };
 }
+
+export const DEFAULT_MAINTENANCE_POLICY: SchedulerMaintenancePolicy = {
+  objectCooldownMs: 30_000,
+  degradedBackoffBaseMs: 60_000,
+  degradedBackoffMaxMs: 15 * 60_000
+};
 
 function buildRunRecord(
   reports: readonly RepairReport<StoredObjectManifest>[],
@@ -780,12 +907,16 @@ function buildRunRecord(
 }
 
 function trackedObjectFromRow(row: ManifestRow): TrackedObjectRecord {
-  return {
+  return removeUndefined({
     contentId: row.content_id,
     manifest: cloneManifest(JSON.parse(row.manifest_json) as StoredObjectManifest),
     registeredAt: row.registered_at,
-    updatedAt: row.updated_at
-  };
+    updatedAt: row.updated_at,
+    consecutiveDegradedRuns: row.consecutive_degraded_runs,
+    nextEligibleAt: row.next_eligible_at ?? undefined,
+    lastSchedulerRunAt: row.last_scheduler_run_at ?? undefined,
+    lastRepairAt: row.last_repair_at ?? undefined
+  });
 }
 
 function peerHealthFromRow(row: PeerHealthRow): PeerHealthRecord {

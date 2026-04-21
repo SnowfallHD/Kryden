@@ -27,10 +27,12 @@ Status: identity, local peer-record serialization, and local audit proofs are im
 - Split peer capacity into allocatable bytes, reserved bytes, and repair headroom.
 - Make scheduler manifest transitions idempotent.
 - Prove restart behavior after a scheduler process dies mid-transition.
+- Combine domain diversity, capacity, repair headroom, audit history, and repair success into placement admission and scoring.
+- Add repair caps, cooldown windows, and degraded-object retry backoff.
 - Anchor audit sampling to public randomness or client-committed randomness.
 - Track peer reliability over time.
 
-Status: local repair, failure-domain placement, capacity headroom, SQLite-backed scheduler transactions, crash-recovery tests, and durable state-backed scheduling are implemented; public-randomness sampling and durable shard persistence are not.
+Status: local repair, failure-domain placement, capacity headroom, peer-health-aware admission/scoring, anti-thrash scheduler controls, SQLite-backed scheduler transactions, crash-recovery tests, and durable state-backed scheduling are implemented; public-randomness sampling and durable shard persistence are not.
 
 ## Milestone 4: Incentives
 

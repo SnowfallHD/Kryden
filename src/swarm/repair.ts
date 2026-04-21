@@ -13,6 +13,10 @@ export interface ShardRepairFailure {
   reason: string;
 }
 
+export interface RepairOptions {
+  maxRepairs?: number;
+}
+
 export interface RepairReport<TManifest> {
   updatedManifest: TManifest;
   audits: StorageAuditResult[];
@@ -21,4 +25,3 @@ export interface RepairReport<TManifest> {
   healthyShards: number;
   requiredShards: number;
 }
-

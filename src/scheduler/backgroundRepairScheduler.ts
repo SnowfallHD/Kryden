@@ -1,12 +1,21 @@
 import type { StoredObjectManifest } from "../storage/manifest.js";
 import type { LocalSwarm } from "../swarm/localSwarm.js";
 import type { RepairReport } from "../swarm/repair.js";
-import { SQLiteStateStore, type SchedulerRunRecord } from "../state/store.js";
+import {
+  DEFAULT_MAINTENANCE_POLICY,
+  SQLiteStateStore,
+  type SchedulerMaintenancePolicy,
+  type SchedulerRunRecord
+} from "../state/store.js";
 
 export interface BackgroundRepairSchedulerOptions {
   intervalMs?: number;
   sampleCount?: number;
   recoverInterruptedTransitions?: boolean;
+  maxRepairsPerRun?: number;
+  objectCooldownMs?: number;
+  degradedBackoffBaseMs?: number;
+  degradedBackoffMaxMs?: number;
 }
 
 export interface SchedulerRunSummary {
@@ -20,6 +29,8 @@ export class BackgroundRepairScheduler {
   private readonly intervalMs: number;
   private readonly sampleCount: number;
   private readonly recoverInterruptedTransitions: boolean;
+  private readonly maxRepairsPerRun: number;
+  private readonly maintenancePolicy: SchedulerMaintenancePolicy;
   private timer: NodeJS.Timeout | undefined;
   private running = false;
 
@@ -33,6 +44,14 @@ export class BackgroundRepairScheduler {
     this.intervalMs = options.intervalMs ?? 60_000;
     this.sampleCount = options.sampleCount ?? 3;
     this.recoverInterruptedTransitions = options.recoverInterruptedTransitions ?? true;
+    this.maxRepairsPerRun = options.maxRepairsPerRun ?? Number.POSITIVE_INFINITY;
+    this.maintenancePolicy = {
+      objectCooldownMs: options.objectCooldownMs ?? DEFAULT_MAINTENANCE_POLICY.objectCooldownMs,
+      degradedBackoffBaseMs:
+        options.degradedBackoffBaseMs ?? DEFAULT_MAINTENANCE_POLICY.degradedBackoffBaseMs,
+      degradedBackoffMaxMs:
+        options.degradedBackoffMaxMs ?? DEFAULT_MAINTENANCE_POLICY.degradedBackoffMaxMs
+    };
 
     if (!Number.isInteger(this.intervalMs) || this.intervalMs <= 0) {
       throw new Error("Scheduler intervalMs must be a positive integer");
@@ -40,6 +59,19 @@ export class BackgroundRepairScheduler {
 
     if (!Number.isInteger(this.sampleCount) || this.sampleCount <= 0) {
       throw new Error("Scheduler sampleCount must be a positive integer");
+    }
+
+    if (
+      this.maxRepairsPerRun !== Number.POSITIVE_INFINITY &&
+      (!Number.isInteger(this.maxRepairsPerRun) || this.maxRepairsPerRun < 0)
+    ) {
+      throw new Error("Scheduler maxRepairsPerRun must be a non-negative integer");
+    }
+
+    for (const [name, value] of Object.entries(this.maintenancePolicy)) {
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`Scheduler ${name} must be a non-negative integer`);
+      }
     }
   }
 
@@ -62,22 +94,35 @@ export class BackgroundRepairScheduler {
           startedAt
         );
       }
-      const trackedObjects = await this.store.getTrackedObjects();
+      const state = await this.store.load();
+      this.swarm.setPeerPlacementHealth(state.peers);
+      const trackedObjects = await this.store.getEligibleTrackedObjects(startedAt);
       const transition = await this.store.beginSchedulerRun(
         trackedObjects.map((object) => object.contentId),
         startedAt
       );
       transitionId = transition.transitionId;
-      const reports = trackedObjects.map((object) =>
-        this.swarm.repairObject(object.manifest, this.sampleCount)
-      );
-      const completedAt = new Date();
+      const reports: RepairReport<StoredObjectManifest>[] = [];
+      let remainingRepairs = this.maxRepairsPerRun;
+      for (const object of trackedObjects) {
+        const maxRepairs =
+          remainingRepairs === Number.POSITIVE_INFINITY
+            ? Number.POSITIVE_INFINITY
+            : Math.max(0, remainingRepairs);
+        const report = this.swarm.repairObject(object.manifest, this.sampleCount, { maxRepairs });
+        reports.push(report);
+        if (remainingRepairs !== Number.POSITIVE_INFINITY) {
+          remainingRepairs = Math.max(0, remainingRepairs - report.repaired.length);
+        }
+      }
+      const completedAt = new Date(startedAt);
       const run = await this.store.commitSchedulerRun(
         transition.transitionId,
         reports,
         startedAt,
         completedAt,
-        this.swarm.toPeerRecords()
+        this.swarm.toPeerRecords(),
+        this.maintenancePolicy
       );
       return {
         run,

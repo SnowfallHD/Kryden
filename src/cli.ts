@@ -241,7 +241,11 @@ async function simulateSchedulerCommand(args: string[]): Promise<void> {
       "reserved-bytes": { type: "string", default: "0" },
       "repair-headroom-bytes": { type: "string" },
       state: { type: "string", default: "tmp/kryden-scheduler-state.sqlite" },
-      "sample-count": { type: "string", default: "3" }
+      "sample-count": { type: "string", default: "3" },
+      "max-repairs-per-run": { type: "string" },
+      "object-cooldown-ms": { type: "string" },
+      "degraded-backoff-base-ms": { type: "string" },
+      "degraded-backoff-max-ms": { type: "string" }
     }
   });
 
@@ -257,6 +261,22 @@ async function simulateSchedulerCommand(args: string[]): Promise<void> {
     "repair-headroom-bytes"
   );
   const sampleCount = parsePositiveInteger(parsed.values["sample-count"], "sample-count");
+  const maxRepairsPerRun = parseOptionalNonNegativeInteger(
+    parsed.values["max-repairs-per-run"],
+    "max-repairs-per-run"
+  );
+  const objectCooldownMs = parseOptionalNonNegativeInteger(
+    parsed.values["object-cooldown-ms"],
+    "object-cooldown-ms"
+  );
+  const degradedBackoffBaseMs = parseOptionalNonNegativeInteger(
+    parsed.values["degraded-backoff-base-ms"],
+    "degraded-backoff-base-ms"
+  );
+  const degradedBackoffMaxMs = parseOptionalNonNegativeInteger(
+    parsed.values["degraded-backoff-max-ms"],
+    "degraded-backoff-max-ms"
+  );
   const statePath = requireString(parsed.values.state, "state");
 
   const plaintext = randomBytes(size);
@@ -271,7 +291,13 @@ async function simulateSchedulerCommand(args: string[]): Promise<void> {
     import("./state/store.js")
   ]);
   const store = new SQLiteStateStore(statePath);
-  const scheduler = new BackgroundRepairScheduler(swarm, store, { sampleCount });
+  const scheduler = new BackgroundRepairScheduler(swarm, store, {
+    sampleCount,
+    maxRepairsPerRun,
+    objectCooldownMs,
+    degradedBackoffBaseMs,
+    degradedBackoffMaxMs
+  });
   const stored = client.put(plaintext, { dataShards, parityShards });
 
   await scheduler.trackObject(stored.manifest);
@@ -368,7 +394,7 @@ Usage:
   kryden encode <input> --out <directory> [--data-shards 6] [--parity-shards 3]
   kryden decode <object-directory> --out <file>
   kryden simulate [--size 1048576] [--peers 12] [--data-shards 6] [--parity-shards 3] [--fail-peers 3] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n] [--skip-repair]
-  kryden simulate-scheduler [--state tmp/kryden-scheduler-state.sqlite] [--sample-count 3] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n]
+  kryden simulate-scheduler [--state tmp/kryden-scheduler-state.sqlite] [--sample-count 3] [--max-repairs-per-run n] [--object-cooldown-ms n] [--degraded-backoff-base-ms n] [--degraded-backoff-max-ms n] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n]
 `);
 }
 

@@ -17,7 +17,15 @@ The repair worker does not need the client content key. That means a future stor
 
 Repair placement avoids the failed peer and prefers buckets that are not already represented in the updated manifest. If the swarm does not have enough independent buckets, repair falls back to the least-bad available peer instead of refusing a recoverable object.
 
-Repair writes can consume peer repair headroom. Regular writes cannot.
+Repair writes can consume peer repair headroom. Regular writes cannot. Within the admitted candidate set, the score combines:
+
+- deterministic shard/peer hash as a tie-breaker;
+- failure-domain reuse penalty;
+- free capacity pressure;
+- repair headroom pressure;
+- audit failure rate;
+- consecutive audit failures;
+- prior successful repair placements as a small positive signal.
 
 ## Current Limits
 
