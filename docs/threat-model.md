@@ -13,6 +13,7 @@
 - **Correlated-risk reduction:** Placement and repair prefer distinct failure-domain buckets.
 - **Repair capacity reservation:** Regular writes cannot consume the headroom reserved for repair.
 - **Manifest transition atomicity:** Scheduler-driven manifest updates, placement changes, peer health, repair events, and run history commit in one SQLite transaction.
+- **Restart after interruption:** Stale running transitions are abandoned on restart before the next repair cycle commits from the last durable manifest.
 
 ## Not Yet Protected
 
@@ -24,6 +25,7 @@
 - **Shard durability across restarts:** Peer identities can be serialized, but shard payloads are still in-memory only.
 - **State confidentiality:** Scheduler SQLite state includes manifests, placements, repair events, and peer health; production needs access controls around the database file.
 - **Failure-domain truthfulness:** Buckets are self-reported simulator labels. Production needs signed, policy-checked, and abuse-resistant topology claims.
+- **Shard side effects before commit:** A killed local repair can leave extra in-memory shard copies on replacement peers even though the manifest is not updated. Production durable shard stores need garbage collection for uncommitted writes.
 - **Traffic analysis:** The local simulator does not hide access patterns.
 - **Malicious clients:** Quotas, abuse controls, and spam resistance are not implemented.
 

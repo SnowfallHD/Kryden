@@ -6,6 +6,7 @@ import { SQLiteStateStore, type SchedulerRunRecord } from "../state/store.js";
 export interface BackgroundRepairSchedulerOptions {
   intervalMs?: number;
   sampleCount?: number;
+  recoverInterruptedTransitions?: boolean;
 }
 
 export interface SchedulerRunSummary {
@@ -18,6 +19,7 @@ export class BackgroundRepairScheduler {
   private readonly store: SQLiteStateStore;
   private readonly intervalMs: number;
   private readonly sampleCount: number;
+  private readonly recoverInterruptedTransitions: boolean;
   private timer: NodeJS.Timeout | undefined;
   private running = false;
 
@@ -30,6 +32,7 @@ export class BackgroundRepairScheduler {
     this.store = store;
     this.intervalMs = options.intervalMs ?? 60_000;
     this.sampleCount = options.sampleCount ?? 3;
+    this.recoverInterruptedTransitions = options.recoverInterruptedTransitions ?? true;
 
     if (!Number.isInteger(this.intervalMs) || this.intervalMs <= 0) {
       throw new Error("Scheduler intervalMs must be a positive integer");
@@ -53,6 +56,12 @@ export class BackgroundRepairScheduler {
     const startedAt = now;
     let transitionId: string | undefined;
     try {
+      if (this.recoverInterruptedTransitions) {
+        await this.store.recoverInterruptedTransitions(
+          "Recovered interrupted scheduler transition",
+          startedAt
+        );
+      }
       const trackedObjects = await this.store.getTrackedObjects();
       const transition = await this.store.beginSchedulerRun(
         trackedObjects.map((object) => object.contentId),

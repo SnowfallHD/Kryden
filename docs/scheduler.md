@@ -34,6 +34,12 @@ Scheduler repair is one SQLite transaction boundary.
 
 If the process exits between steps 1 and 3, durable state still points at the previous manifest. Replacement shard writes may have occurred in the local swarm, but no half-updated manifest is published.
 
+## Crash Recovery
+
+On restart, `BackgroundRepairScheduler.runOnce()` asks the store to recover interrupted transitions before opening a new one. Any stale `running` transition is marked `abandoned` with a recovery error. The next repair cycle starts from the last committed manifest, so the durable state never publishes partial placement changes from the killed process.
+
+The test suite covers this with a child process that opens the SQLite database, records a `running` transition, and is killed with `SIGKILL` before commit. The parent process then restarts the scheduler against the same database and verifies that the stale transition is abandoned, the previous manifest remains intact until the new commit, and the new repair cycle commits cleanly.
+
 ## Health Semantics
 
 - A passing audit increments `auditsPassed`, resets `consecutiveFailures`, and updates `lastOkAt`.

@@ -246,6 +246,38 @@ export class SQLiteStateStore {
     `).run(completedAt.toISOString(), error, transitionId);
   }
 
+  async recoverInterruptedTransitions(
+    error = "Recovered interrupted scheduler transition",
+    completedAt = new Date()
+  ): Promise<StateTransitionRecord[]> {
+    const running = this.db.prepare(`
+      SELECT * FROM state_transitions
+      WHERE status = 'running'
+      ORDER BY started_at ASC, transition_id ASC
+    `).all().map((row) => transitionFromRow(row as unknown as StateTransitionRow));
+
+    if (running.length === 0) {
+      return [];
+    }
+
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE state_transitions
+        SET status = 'abandoned',
+          completed_at = ?,
+          error = ?
+        WHERE status = 'running'
+      `).run(completedAt.toISOString(), error);
+    });
+
+    return running.map((transition) => ({
+      ...transition,
+      status: "abandoned",
+      completedAt: completedAt.toISOString(),
+      error
+    }));
+  }
+
   async recordSchedulerRun(
     reports: readonly RepairReport<StoredObjectManifest>[],
     startedAt: Date,

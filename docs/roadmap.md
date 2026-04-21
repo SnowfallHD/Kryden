@@ -26,10 +26,11 @@ Status: identity, local peer-record serialization, and local audit proofs are im
 - Add basic failure-domain-aware placement.
 - Split peer capacity into allocatable bytes, reserved bytes, and repair headroom.
 - Make scheduler manifest transitions idempotent.
+- Prove restart behavior after a scheduler process dies mid-transition.
 - Anchor audit sampling to public randomness or client-committed randomness.
 - Track peer reliability over time.
 
-Status: local repair, failure-domain placement, capacity headroom, SQLite-backed scheduler transactions, and durable state-backed scheduling are implemented; public-randomness sampling and durable shard persistence are not.
+Status: local repair, failure-domain placement, capacity headroom, SQLite-backed scheduler transactions, crash-recovery tests, and durable state-backed scheduling are implemented; public-randomness sampling and durable shard persistence are not.
 
 ## Milestone 4: Incentives
 

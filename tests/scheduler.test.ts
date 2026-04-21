@@ -1,4 +1,5 @@
-import { mkdtemp } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -172,6 +173,73 @@ describe("background audit and repair scheduler", () => {
     expect(state.transitions[transition.transitionId].status).toBe("abandoned");
     expect(state.transitions[transition.transitionId].error).toBe("simulated crash");
     expect(state.objects[stored.manifest.contentId].manifest).toEqual(stored.manifest);
+  });
+
+  it("recovers after a scheduler process is killed mid-transition", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "kryden-crash-"));
+    const statePath = join(directory, "state.sqlite");
+    const crashScript = join(directory, "crash-mid-transition.mjs");
+    const plaintext = randomBytes(32 * 1024);
+    const swarm = createLocalSwarm(8, 1024 * 1024);
+    const client = new KrydenClient(swarm);
+    const initialStore = new SQLiteStateStore(statePath);
+    const stored = client.put(plaintext, { dataShards: 4, parityShards: 2 });
+    const failedPeerId = stored.manifest.shards[0].peerId;
+
+    await initialStore.trackObject(stored.manifest, new Date("2026-04-21T08:00:00.000Z"));
+    initialStore.close();
+    swarm.setPeerOnline(failedPeerId, false);
+    await writeFile(
+      crashScript,
+      `
+        import { SQLiteStateStore } from ${JSON.stringify(`${process.cwd()}/src/state/store.ts`)};
+        const store = new SQLiteStateStore(process.env.KRYDEN_STATE_PATH);
+        const trackedObjects = await store.getTrackedObjects();
+        await store.beginSchedulerRun(
+          trackedObjects.map((object) => object.contentId),
+          new Date("2026-04-21T08:01:00.000Z")
+        );
+        process.kill(process.pid, "SIGKILL");
+      `
+    );
+
+    const killed = spawnSync(process.execPath, ["--import", "tsx", crashScript], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        KRYDEN_STATE_PATH: statePath
+      },
+      encoding: "utf8"
+    });
+
+    expect(killed.signal).toBe("SIGKILL");
+
+    const crashedStore = new SQLiteStateStore(statePath);
+    const crashedState = await crashedStore.load();
+    const runningTransition = Object.values(crashedState.transitions).find(
+      (transition) => transition.status === "running"
+    );
+
+    expect(runningTransition).toBeDefined();
+    expect(crashedState.runs).toHaveLength(0);
+    expect(crashedState.objects[stored.manifest.contentId].manifest).toEqual(stored.manifest);
+    crashedStore.close();
+
+    const restartStore = new SQLiteStateStore(statePath);
+    const restartedScheduler = new BackgroundRepairScheduler(swarm, restartStore, { sampleCount: 2 });
+    const summary = await restartedScheduler.runOnce(new Date("2026-04-21T08:02:00.000Z"));
+    const recoveredState = await restartStore.load();
+    const transitions = Object.values(recoveredState.transitions);
+    const recoveredManifest = recoveredState.objects[stored.manifest.contentId].manifest;
+    const recovered = client.get(recoveredManifest, stored.secret);
+
+    expect(summary.run.repairsSucceeded).toBe(1);
+    expect(recovered.equals(plaintext)).toBe(true);
+    expect(recoveredManifest.shards[0].peerId).not.toBe(failedPeerId);
+    expect(transitions.some((transition) => transition.status === "abandoned")).toBe(true);
+    expect(transitions.some((transition) => transition.status === "committed")).toBe(true);
+    expect(transitions.every((transition) => transition.status !== "running")).toBe(true);
+    expect(recoveredState.runs).toHaveLength(1);
   });
 });
 
