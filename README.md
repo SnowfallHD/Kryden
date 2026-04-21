@@ -12,7 +12,7 @@ This repo currently implements:
 - Merkle shard commitments and signed proof-of-storage audits.
 - Persistent local peer records for stable simulated peer identity.
 - Encrypted-object repair that restores failed shard placements when enough shards survive.
-- A background audit/repair scheduler backed by durable JSON state.
+- A background audit/repair scheduler backed by durable SQLite state.
 - Failure-domain-aware placement using labeled peer buckets.
 - Peer capacity accounting with allocatable bytes, reserved bytes, and repair headroom.
 - Local peer swarm simulation with deterministic placement and capacity checks.
@@ -51,10 +51,10 @@ By default the simulation then runs repair and re-audits the updated manifest.
 Run the durable scheduler simulation:
 
 ```bash
-npx tsx src/cli.ts simulate-scheduler --state tmp/kryden-scheduler-state.json
+npx tsx src/cli.ts simulate-scheduler --state tmp/kryden-scheduler-state.sqlite
 ```
 
-This writes tracked objects, peer health, and scheduler run history to a JSON state file.
+This writes tracked objects, peer health, shard placements, repair events, transitions, and scheduler run history to SQLite.
 Use `--failure-domains`, `--reserved-bytes`, and `--repair-headroom-bytes` to exercise correlated-risk and capacity-pressure scenarios.
 
 ## Architecture
@@ -82,7 +82,7 @@ src/crypto/       Client-side encryption and integrity checks
 src/erasure/      Reed-Solomon coding over GF(256)
 src/storage/      Manifest, secret, and Merkle commitment schemas
 src/swarm/        Local peer identity, placement, audit, and repair simulation
-src/state/        Durable JSON scheduler state
+src/state/        Durable SQLite scheduler state
 src/scheduler/    Background audit and repair scheduler
 src/cli.ts        Developer CLI
 tests/            End-to-end and primitive tests

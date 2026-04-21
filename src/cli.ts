@@ -7,8 +7,6 @@ import { parseArgs } from "node:util";
 import { decryptPayload, encryptPayload } from "./crypto/envelope.js";
 import { decodeErasure, encodeErasure, type EncodedShard } from "./erasure/reedSolomon.js";
 import {
-  BackgroundRepairScheduler,
-  JsonStateStore,
   KrydenClient,
   createLocalSwarm,
   type ClientSecret,
@@ -242,7 +240,7 @@ async function simulateSchedulerCommand(args: string[]): Promise<void> {
       "failure-domains": { type: "string" },
       "reserved-bytes": { type: "string", default: "0" },
       "repair-headroom-bytes": { type: "string" },
-      state: { type: "string", default: "tmp/kryden-scheduler-state.json" },
+      state: { type: "string", default: "tmp/kryden-scheduler-state.sqlite" },
       "sample-count": { type: "string", default: "3" }
     }
   });
@@ -268,7 +266,11 @@ async function simulateSchedulerCommand(args: string[]): Promise<void> {
     repairHeadroomBytes
   });
   const client = new KrydenClient(swarm);
-  const store = new JsonStateStore(statePath);
+  const [{ BackgroundRepairScheduler }, { SQLiteStateStore }] = await Promise.all([
+    import("./scheduler/backgroundRepairScheduler.js"),
+    import("./state/store.js")
+  ]);
+  const store = new SQLiteStateStore(statePath);
   const scheduler = new BackgroundRepairScheduler(swarm, store, { sampleCount });
   const stored = client.put(plaintext, { dataShards, parityShards });
 
@@ -366,7 +368,7 @@ Usage:
   kryden encode <input> --out <directory> [--data-shards 6] [--parity-shards 3]
   kryden decode <object-directory> --out <file>
   kryden simulate [--size 1048576] [--peers 12] [--data-shards 6] [--parity-shards 3] [--fail-peers 3] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n] [--skip-repair]
-  kryden simulate-scheduler [--state tmp/kryden-scheduler-state.json] [--sample-count 3] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n]
+  kryden simulate-scheduler [--state tmp/kryden-scheduler-state.sqlite] [--sample-count 3] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n]
 `);
 }
 

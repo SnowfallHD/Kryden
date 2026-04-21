@@ -4,29 +4,32 @@ The scheduler runs audit and repair as a continuous maintenance loop.
 
 ## Components
 
-- `JsonStateStore` persists tracked object manifests, peer health counters, and bounded scheduler run history.
+- `SQLiteStateStore` persists tracked object manifests, shard placements, peer health counters, repair events, transitions, and bounded scheduler run history.
 - `BackgroundRepairScheduler` loads tracked objects from the store, calls local repair for each object, records the updated manifests, and updates health history.
 - `runOnce()` performs one deterministic maintenance pass for tests and command-line simulations.
 - `start()` and `stop()` run the same pass on an interval for a long-lived process.
 
-## State File
+## SQLite Tables
 
-The JSON state file stores:
+The SQLite state store starts with these tables:
 
-- `objects`: content ids mapped to the latest known manifest.
-- `peers`: audit pass/fail counts, consecutive failures, last seen errors, and repair placement counts.
-- `runs`: bounded run summaries with audit and repair totals.
-- `transitions`: running, committed, and abandoned state transitions.
+- `peers`: known peers and their latest public key and failure-domain labels.
+- `peer_health`: audit pass/fail counts, consecutive failures, last seen errors, and repair placement counts.
+- `manifests`: latest tracked manifest for each content id.
+- `shard_placements`: current normalized shard placement rows for every tracked manifest.
+- `scheduler_runs`: bounded run summaries with audit and repair totals.
+- `state_transitions`: running, committed, and abandoned maintenance transitions.
+- `repair_events`: per-shard successful and failed repair events.
 
-The state file does not store shard bytes or client content keys.
+The state database does not store shard bytes or client content keys.
 
 ## State Transitions
 
-Scheduler repair is idempotent at the manifest-state boundary.
+Scheduler repair is one SQLite transaction boundary.
 
 1. The store records a `running` transition with the object ids under maintenance.
 2. The scheduler performs audits and repair against the in-memory swarm.
-3. The store atomically commits updated manifests, peer health, and the run summary in one file replace.
+3. The store commits updated manifests, shard placements, peer health, repair events, transition status, and the run summary in one SQLite transaction.
 4. If repair throws, the transition is marked `abandoned` and tracked manifests remain unchanged.
 
 If the process exits between steps 1 and 3, durable state still points at the previous manifest. Replacement shard writes may have occurred in the local swarm, but no half-updated manifest is published.
@@ -39,7 +42,7 @@ If the process exits between steps 1 and 3, durable state still points at the pr
 
 ## Current Limits
 
-- Scheduler state is durable, but shard payloads are still in memory.
+- Scheduler state is durable SQLite, but shard payloads are still in memory.
 - A restarted process can reload state, but cannot repair until shard persistence or real peer transport exists.
 - Timer errors are swallowed so later intervals can try again; production observability needs structured logging.
 - Audit randomness is local; production should anchor challenge selection to public or committed randomness.

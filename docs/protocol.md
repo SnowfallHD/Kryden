@@ -34,7 +34,7 @@ Repair starts with an audit pass. Failed shard placements are treated as unavail
 
 ### 8. Schedule
 
-A background scheduler tracks manifests in a durable JSON state file, runs audit and repair passes, updates manifests after successful repairs, and accumulates peer health history over time. State changes are transition-backed: the store records a running transition first, then atomically commits updated manifests and run history together. A crash before commit leaves the previous manifest intact and the transition visible for cleanup or retry.
+A background scheduler tracks manifests in durable SQLite tables, runs audit and repair passes, updates manifests after successful repairs, and accumulates peer health history over time. Each repair cycle commits at one transaction boundary: manifest updates, placement changes, peer health, repair events, transition status, and run history all commit together or roll back together.
 
 ## Public Manifest
 

@@ -29,7 +29,7 @@ Status: identity, local peer-record serialization, and local audit proofs are im
 - Anchor audit sampling to public randomness or client-committed randomness.
 - Track peer reliability over time.
 
-Status: local repair, failure-domain placement, capacity headroom, idempotent JSON-backed scheduler transitions, and durable state-backed scheduling are implemented; public-randomness sampling, SQLite storage, and durable shard persistence are not.
+Status: local repair, failure-domain placement, capacity headroom, SQLite-backed scheduler transactions, and durable state-backed scheduling are implemented; public-randomness sampling and durable shard persistence are not.
 
 ## Milestone 4: Incentives
 

@@ -1,15 +1,13 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
-import {
-  BackgroundRepairScheduler,
-  JsonStateStore,
-  KrydenClient,
-  createLocalSwarm
-} from "../src/kryden.js";
+import { KrydenClient, createLocalSwarm } from "../src/kryden.js";
+import { BackgroundRepairScheduler } from "../src/scheduler/backgroundRepairScheduler.js";
+import { SQLiteStateStore } from "../src/state/store.js";
 
 describe("background audit and repair scheduler", () => {
   it("repairs tracked objects and persists peer health", async () => {
@@ -17,7 +15,7 @@ describe("background audit and repair scheduler", () => {
     const plaintext = randomBytes(64 * 1024);
     const swarm = createLocalSwarm(10, 1024 * 1024);
     const client = new KrydenClient(swarm);
-    const store = new JsonStateStore(statePath);
+    const store = new SQLiteStateStore(statePath);
     const scheduler = new BackgroundRepairScheduler(swarm, store, { sampleCount: 2 });
     const stored = client.put(plaintext, { dataShards: 4, parityShards: 2 });
 
@@ -58,7 +56,7 @@ describe("background audit and repair scheduler", () => {
     const statePath = await createStatePath();
     const swarm = createLocalSwarm(8, 1024 * 1024);
     const client = new KrydenClient(swarm);
-    const store = new JsonStateStore(statePath);
+    const store = new SQLiteStateStore(statePath);
     const scheduler = new BackgroundRepairScheduler(swarm, store, { sampleCount: 2 });
     const stored = client.put(randomBytes(32 * 1024), { dataShards: 4, parityShards: 2 });
 
@@ -74,30 +72,64 @@ describe("background audit and repair scheduler", () => {
     }
   });
 
-  it("stores state as durable JSON", async () => {
+  it("stores state in durable SQLite tables", async () => {
     const statePath = await createStatePath();
     const swarm = createLocalSwarm(6, 1024 * 1024);
     const client = new KrydenClient(swarm);
-    const store = new JsonStateStore(statePath);
+    const store = new SQLiteStateStore(statePath);
     const scheduler = new BackgroundRepairScheduler(swarm, store);
     const stored = client.put(randomBytes(4096), { dataShards: 3, parityShards: 2 });
 
     await scheduler.trackObject(stored.manifest);
     await scheduler.runOnce();
 
-    const raw = await readFile(statePath, "utf8");
-    const parsed = JSON.parse(raw) as { version: number; objects: Record<string, unknown>; runs: unknown[] };
+    const state = await store.load();
+    const db = new DatabaseSync(statePath);
+    const tables = db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table'
+      ORDER BY name
+    `).all().map((row) => (row as { name: string }).name);
+    const placementCount = db.prepare("SELECT COUNT(*) AS count FROM shard_placements").get() as {
+      count: number;
+    };
+    const repairEventCount = db.prepare("SELECT COUNT(*) AS count FROM repair_events").get() as {
+      count: number;
+    };
+    const peerAccounting = db.prepare(`
+      SELECT COUNT(*) AS count FROM peers
+      WHERE capacity_bytes IS NOT NULL
+        AND reserved_bytes IS NOT NULL
+        AND repair_headroom_bytes IS NOT NULL
+        AND used_bytes IS NOT NULL
+        AND allocatable_bytes IS NOT NULL
+    `).get() as { count: number };
+    db.close();
 
-    expect(parsed.version).toBe(1);
-    expect(Object.keys(parsed.objects)).toEqual([stored.manifest.contentId]);
-    expect(parsed.runs).toHaveLength(1);
+    expect(state.version).toBe(1);
+    expect(Object.keys(state.objects)).toEqual([stored.manifest.contentId]);
+    expect(state.runs).toHaveLength(1);
+    expect(tables).toEqual(
+      expect.arrayContaining([
+        "peers",
+        "peer_health",
+        "manifests",
+        "shard_placements",
+        "scheduler_runs",
+        "state_transitions",
+        "repair_events"
+      ])
+    );
+    expect(placementCount.count).toBe(stored.manifest.shards.length);
+    expect(repairEventCount.count).toBe(0);
+    expect(peerAccounting.count).toBeGreaterThan(0);
   });
 
   it("does not update durable manifests until a transition commits", async () => {
     const statePath = await createStatePath();
     const swarm = createLocalSwarm(8, 1024 * 1024);
     const client = new KrydenClient(swarm);
-    const store = new JsonStateStore(statePath);
+    const store = new SQLiteStateStore(statePath);
     const stored = client.put(randomBytes(32 * 1024), { dataShards: 4, parityShards: 2 });
     const failedPeerId = stored.manifest.shards[0].peerId;
 
@@ -129,7 +161,7 @@ describe("background audit and repair scheduler", () => {
     const statePath = await createStatePath();
     const swarm = createLocalSwarm(6, 1024 * 1024);
     const client = new KrydenClient(swarm);
-    const store = new JsonStateStore(statePath);
+    const store = new SQLiteStateStore(statePath);
     const stored = client.put(randomBytes(4096), { dataShards: 3, parityShards: 2 });
 
     await store.trackObject(stored.manifest);
@@ -145,5 +177,5 @@ describe("background audit and repair scheduler", () => {
 
 async function createStatePath(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "kryden-state-"));
-  return join(directory, "state.json");
+  return join(directory, "state.sqlite");
 }

@@ -13,6 +13,10 @@ export interface LocalPeerRecord {
   capacityBytes: number;
   reservedBytes?: number;
   repairHeadroomBytes?: number;
+  usedBytes?: number;
+  allocatableBytes?: number;
+  regularFreeBytes?: number;
+  repairFreeBytes?: number;
   failureDomain?: FailureDomain;
   publicKeyPem: string;
   privateKeyPem: string;
@@ -170,6 +174,10 @@ export class PeerStore {
       capacityBytes: this.capacityBytes,
       reservedBytes: this.reservedBytes,
       repairHeadroomBytes: this.repairHeadroomBytes,
+      usedBytes: this.usedBytes,
+      allocatableBytes: this.allocatableBytes,
+      regularFreeBytes: this.regularFreeBytes,
+      repairFreeBytes: this.repairFreeBytes,
       failureDomain: { ...this.failureDomain },
       publicKeyPem: this.identity.publicKeyPem,
       privateKeyPem: this.identity.privateKeyPem,

@@ -1,7 +1,7 @@
 import type { StoredObjectManifest } from "../storage/manifest.js";
 import type { LocalSwarm } from "../swarm/localSwarm.js";
 import type { RepairReport } from "../swarm/repair.js";
-import { JsonStateStore, type SchedulerRunRecord } from "../state/store.js";
+import { SQLiteStateStore, type SchedulerRunRecord } from "../state/store.js";
 
 export interface BackgroundRepairSchedulerOptions {
   intervalMs?: number;
@@ -15,7 +15,7 @@ export interface SchedulerRunSummary {
 
 export class BackgroundRepairScheduler {
   private readonly swarm: LocalSwarm;
-  private readonly store: JsonStateStore;
+  private readonly store: SQLiteStateStore;
   private readonly intervalMs: number;
   private readonly sampleCount: number;
   private timer: NodeJS.Timeout | undefined;
@@ -23,7 +23,7 @@ export class BackgroundRepairScheduler {
 
   constructor(
     swarm: LocalSwarm,
-    store: JsonStateStore,
+    store: SQLiteStateStore,
     options: BackgroundRepairSchedulerOptions = {}
   ) {
     this.swarm = swarm;
@@ -67,7 +67,8 @@ export class BackgroundRepairScheduler {
         transition.transitionId,
         reports,
         startedAt,
-        completedAt
+        completedAt,
+        this.swarm.toPeerRecords()
       );
       return {
         run,
