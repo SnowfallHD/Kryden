@@ -53,6 +53,7 @@ export class KrydenClient {
 
 export type { ClientSecret, StoredObjectManifest } from "./storage/manifest.js";
 export { createLocalSwarm, createLocalSwarmFromRecords, LocalSwarm } from "./swarm/localSwarm.js";
+export type { LocalSwarmOptions } from "./swarm/localSwarm.js";
 export { createPeerIdentity } from "./swarm/identity.js";
 export { createStorageAuditChallenge, verifyStorageAuditProof } from "./swarm/audit.js";
 export type { LocalPeerRecord } from "./swarm/peer.js";
@@ -67,6 +68,8 @@ export type {
   KrydenStateSnapshot,
   PeerHealthRecord,
   SchedulerRunRecord,
+  StateTransitionRecord,
+  StateTransitionStatus,
   TrackedObjectRecord
 } from "./state/store.js";
 export { decodeErasure, encodeErasure } from "./erasure/reedSolomon.js";

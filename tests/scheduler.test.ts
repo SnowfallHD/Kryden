@@ -92,10 +92,58 @@ describe("background audit and repair scheduler", () => {
     expect(Object.keys(parsed.objects)).toEqual([stored.manifest.contentId]);
     expect(parsed.runs).toHaveLength(1);
   });
+
+  it("does not update durable manifests until a transition commits", async () => {
+    const statePath = await createStatePath();
+    const swarm = createLocalSwarm(8, 1024 * 1024);
+    const client = new KrydenClient(swarm);
+    const store = new JsonStateStore(statePath);
+    const stored = client.put(randomBytes(32 * 1024), { dataShards: 4, parityShards: 2 });
+    const failedPeerId = stored.manifest.shards[0].peerId;
+
+    await store.trackObject(stored.manifest, new Date("2026-04-21T08:00:00.000Z"));
+    swarm.setPeerOnline(failedPeerId, false);
+    const transition = await store.beginSchedulerRun(
+      [stored.manifest.contentId],
+      new Date("2026-04-21T08:01:00.000Z")
+    );
+    const report = client.repair(stored.manifest, 2);
+    const beforeCommit = await store.load();
+
+    expect(beforeCommit.transitions[transition.transitionId].status).toBe("running");
+    expect(beforeCommit.objects[stored.manifest.contentId].manifest.shards[0].peerId).toBe(failedPeerId);
+
+    await store.commitSchedulerRun(
+      transition.transitionId,
+      [report],
+      new Date("2026-04-21T08:01:00.000Z"),
+      new Date("2026-04-21T08:01:01.000Z")
+    );
+    const afterCommit = await store.load();
+
+    expect(afterCommit.transitions[transition.transitionId].status).toBe("committed");
+    expect(afterCommit.objects[stored.manifest.contentId].manifest.shards[0].peerId).not.toBe(failedPeerId);
+  });
+
+  it("marks failed transitions abandoned without changing tracked manifests", async () => {
+    const statePath = await createStatePath();
+    const swarm = createLocalSwarm(6, 1024 * 1024);
+    const client = new KrydenClient(swarm);
+    const store = new JsonStateStore(statePath);
+    const stored = client.put(randomBytes(4096), { dataShards: 3, parityShards: 2 });
+
+    await store.trackObject(stored.manifest);
+    const transition = await store.beginSchedulerRun([stored.manifest.contentId]);
+    await store.abandonTransition(transition.transitionId, "simulated crash");
+    const state = await store.load();
+
+    expect(state.transitions[transition.transitionId].status).toBe("abandoned");
+    expect(state.transitions[transition.transitionId].error).toBe("simulated crash");
+    expect(state.objects[stored.manifest.contentId].manifest).toEqual(stored.manifest);
+  });
 });
 
 async function createStatePath(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "kryden-state-"));
   return join(directory, "state.json");
 }
-

@@ -48,11 +48,24 @@ export interface SchedulerRunRecord {
   objects: SchedulerObjectRunRecord[];
 }
 
+export type StateTransitionStatus = "running" | "committed" | "abandoned";
+
+export interface StateTransitionRecord {
+  transitionId: string;
+  status: StateTransitionStatus;
+  startedAt: string;
+  completedAt?: string;
+  objectIds: string[];
+  committedRunId?: string;
+  error?: string;
+}
+
 export interface KrydenStateSnapshot {
   version: 1;
   objects: Record<string, TrackedObjectRecord>;
   peers: Record<string, PeerHealthRecord>;
   runs: SchedulerRunRecord[];
+  transitions: Record<string, StateTransitionRecord>;
 }
 
 export class JsonStateStore {
@@ -84,7 +97,8 @@ export class JsonStateStore {
         version: 1,
         objects: parsed.objects ?? {},
         peers: parsed.peers ?? {},
-        runs: parsed.runs ?? []
+        runs: parsed.runs ?? [],
+        transitions: parsed.transitions ?? {}
       };
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
@@ -136,12 +150,36 @@ export class JsonStateStore {
     return Object.values(snapshot.objects).map(cloneTrackedObject);
   }
 
-  async recordSchedulerRun(
+  async beginSchedulerRun(objectIds: readonly string[], startedAt = new Date()): Promise<StateTransitionRecord> {
+    const snapshot = await this.load();
+    const transition: StateTransitionRecord = {
+      transitionId: randomUUID(),
+      status: "running",
+      startedAt: startedAt.toISOString(),
+      objectIds: [...objectIds]
+    };
+
+    snapshot.transitions[transition.transitionId] = transition;
+    await this.save(snapshot);
+    return { ...transition };
+  }
+
+  async commitSchedulerRun(
+    transitionId: string,
     reports: readonly RepairReport<StoredObjectManifest>[],
     startedAt: Date,
     completedAt: Date
   ): Promise<SchedulerRunRecord> {
     const snapshot = await this.load();
+    const transition = snapshot.transitions[transitionId];
+    if (!transition) {
+      throw new Error(`Unknown scheduler transition ${transitionId}`);
+    }
+
+    if (transition.status !== "running") {
+      throw new Error(`Scheduler transition ${transitionId} is already ${transition.status}`);
+    }
+
     const run = buildRunRecord(reports, startedAt, completedAt);
 
     for (const report of reports) {
@@ -155,9 +193,47 @@ export class JsonStateStore {
       updatePeerHealth(snapshot.peers, report.audits, report.repaired, completedAt);
     }
 
+    snapshot.transitions[transitionId] = {
+      ...transition,
+      status: "committed",
+      completedAt: completedAt.toISOString(),
+      committedRunId: run.runId
+    };
     snapshot.runs = [...snapshot.runs, run].slice(-this.maxRunHistory);
     await this.save(snapshot);
     return run;
+  }
+
+  async abandonTransition(
+    transitionId: string,
+    error: string,
+    completedAt = new Date()
+  ): Promise<void> {
+    const snapshot = await this.load();
+    const transition = snapshot.transitions[transitionId];
+    if (!transition || transition.status !== "running") {
+      return;
+    }
+
+    snapshot.transitions[transitionId] = {
+      ...transition,
+      status: "abandoned",
+      completedAt: completedAt.toISOString(),
+      error
+    };
+    await this.save(snapshot);
+  }
+
+  async recordSchedulerRun(
+    reports: readonly RepairReport<StoredObjectManifest>[],
+    startedAt: Date,
+    completedAt: Date
+  ): Promise<SchedulerRunRecord> {
+    const transition = await this.beginSchedulerRun(
+      reports.map((report) => report.updatedManifest.contentId),
+      startedAt
+    );
+    return this.commitSchedulerRun(transition.transitionId, reports, startedAt, completedAt);
   }
 }
 
@@ -166,7 +242,8 @@ export function emptyState(): KrydenStateSnapshot {
     version: 1,
     objects: {},
     peers: {},
-    runs: []
+    runs: [],
+    transitions: {}
   };
 }
 
@@ -261,4 +338,3 @@ function cloneManifest(manifest: StoredObjectManifest): StoredObjectManifest {
     shards: manifest.shards.map((descriptor) => ({ ...descriptor }))
   };
 }
-

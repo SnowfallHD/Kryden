@@ -148,6 +148,9 @@ async function simulateCommand(args: string[]): Promise<void> {
       "data-shards": { type: "string", default: "6" },
       "parity-shards": { type: "string", default: "3" },
       "fail-peers": { type: "string", default: "3" },
+      "failure-domains": { type: "string" },
+      "reserved-bytes": { type: "string", default: "0" },
+      "repair-headroom-bytes": { type: "string" },
       "skip-repair": { type: "boolean", default: false }
     }
   });
@@ -157,8 +160,18 @@ async function simulateCommand(args: string[]): Promise<void> {
   const dataShards = parsePositiveInteger(parsed.values["data-shards"], "data-shards");
   const parityShards = parsePositiveInteger(parsed.values["parity-shards"], "parity-shards");
   const failPeers = parsePositiveInteger(parsed.values["fail-peers"], "fail-peers");
+  const failureDomainCount = parseOptionalPositiveInteger(parsed.values["failure-domains"], "failure-domains");
+  const reservedBytes = parseNonNegativeInteger(parsed.values["reserved-bytes"], "reserved-bytes");
+  const repairHeadroomBytes = parseOptionalNonNegativeInteger(
+    parsed.values["repair-headroom-bytes"],
+    "repair-headroom-bytes"
+  );
   const plaintext = randomBytes(size);
-  const swarm = createLocalSwarm(peers, size * 2);
+  const swarm = createLocalSwarm(peers, size * 2, {
+    failureDomainCount,
+    reservedBytes,
+    repairHeadroomBytes
+  });
   const client = new KrydenClient(swarm);
   const stored = client.put(plaintext, { dataShards, parityShards });
 
@@ -181,6 +194,7 @@ async function simulateCommand(args: string[]): Promise<void> {
         size,
         peers,
         offlinePeers: swarm.offlinePeerIds(),
+        failureDomains: new Set(swarm.peers.map((peer) => peer.failureDomain.bucket)).size,
         audits: {
           passing: passingAudits,
           total: audits.length,
@@ -225,6 +239,9 @@ async function simulateSchedulerCommand(args: string[]): Promise<void> {
       "data-shards": { type: "string", default: "6" },
       "parity-shards": { type: "string", default: "3" },
       "fail-peers": { type: "string", default: "3" },
+      "failure-domains": { type: "string" },
+      "reserved-bytes": { type: "string", default: "0" },
+      "repair-headroom-bytes": { type: "string" },
       state: { type: "string", default: "tmp/kryden-scheduler-state.json" },
       "sample-count": { type: "string", default: "3" }
     }
@@ -235,11 +252,21 @@ async function simulateSchedulerCommand(args: string[]): Promise<void> {
   const dataShards = parsePositiveInteger(parsed.values["data-shards"], "data-shards");
   const parityShards = parsePositiveInteger(parsed.values["parity-shards"], "parity-shards");
   const failPeers = parsePositiveInteger(parsed.values["fail-peers"], "fail-peers");
+  const failureDomainCount = parseOptionalPositiveInteger(parsed.values["failure-domains"], "failure-domains");
+  const reservedBytes = parseNonNegativeInteger(parsed.values["reserved-bytes"], "reserved-bytes");
+  const repairHeadroomBytes = parseOptionalNonNegativeInteger(
+    parsed.values["repair-headroom-bytes"],
+    "repair-headroom-bytes"
+  );
   const sampleCount = parsePositiveInteger(parsed.values["sample-count"], "sample-count");
   const statePath = requireString(parsed.values.state, "state");
 
   const plaintext = randomBytes(size);
-  const swarm = createLocalSwarm(peers, size * 2);
+  const swarm = createLocalSwarm(peers, size * 2, {
+    failureDomainCount,
+    reservedBytes,
+    repairHeadroomBytes
+  });
   const client = new KrydenClient(swarm);
   const store = new JsonStateStore(statePath);
   const scheduler = new BackgroundRepairScheduler(swarm, store, { sampleCount });
@@ -263,6 +290,7 @@ async function simulateSchedulerCommand(args: string[]): Promise<void> {
         ok: recovered.equals(plaintext),
         statePath,
         offlinePeers: swarm.offlinePeerIds(),
+        failureDomains: new Set(swarm.peers.map((peer) => peer.failureDomain.bucket)).size,
         run: summary.run,
         trackedObjects: Object.keys(state.objects).length,
         peerHealth: state.peers,
@@ -290,6 +318,35 @@ function parsePositiveInteger(value: string | boolean | undefined, name: string)
   return parsed;
 }
 
+function parseOptionalPositiveInteger(value: string | boolean | undefined, name: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return parsePositiveInteger(value, name);
+}
+
+function parseNonNegativeInteger(value: string | boolean | undefined, name: string): number {
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be provided`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+
+  return parsed;
+}
+
+function parseOptionalNonNegativeInteger(value: string | boolean | undefined, name: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return parseNonNegativeInteger(value, name);
+}
+
 function requireString(value: string | boolean | undefined, name: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`${name} must be provided`);
@@ -308,8 +365,8 @@ function printHelp(): void {
 Usage:
   kryden encode <input> --out <directory> [--data-shards 6] [--parity-shards 3]
   kryden decode <object-directory> --out <file>
-  kryden simulate [--size 1048576] [--peers 12] [--data-shards 6] [--parity-shards 3] [--fail-peers 3] [--skip-repair]
-  kryden simulate-scheduler [--state tmp/kryden-scheduler-state.json] [--sample-count 3]
+  kryden simulate [--size 1048576] [--peers 12] [--data-shards 6] [--parity-shards 3] [--fail-peers 3] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n] [--skip-repair]
+  kryden simulate-scheduler [--state tmp/kryden-scheduler-state.json] [--sample-count 3] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n]
 `);
 }
 

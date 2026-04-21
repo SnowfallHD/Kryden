@@ -13,6 +13,8 @@ This repo currently implements:
 - Persistent local peer records for stable simulated peer identity.
 - Encrypted-object repair that restores failed shard placements when enough shards survive.
 - A background audit/repair scheduler backed by durable JSON state.
+- Failure-domain-aware placement using labeled peer buckets.
+- Peer capacity accounting with allocatable bytes, reserved bytes, and repair headroom.
 - Local peer swarm simulation with deterministic placement and capacity checks.
 - CLI flows for encoding, decoding, and failure simulation.
 - Tests for shard recovery, tamper detection, and peer-loss reconstruction.
@@ -53,6 +55,7 @@ npx tsx src/cli.ts simulate-scheduler --state tmp/kryden-scheduler-state.json
 ```
 
 This writes tracked objects, peer health, and scheduler run history to a JSON state file.
+Use `--failure-domains`, `--reserved-bytes`, and `--repair-headroom-bytes` to exercise correlated-risk and capacity-pressure scenarios.
 
 ## Architecture
 
@@ -64,10 +67,11 @@ Kryden's storage path is:
 4. Commit each shard to a Merkle root for sampled storage audits.
 5. Place shards across peers using deterministic placement weighted by available capacity.
 6. Challenge peers to sign sampled Merkle proofs for stored shards.
-7. Repair failed shard placements by reconstructing encrypted bytes from surviving shards and re-placing missing shard indexes.
-8. Persist scheduler run history and peer health counters.
-9. Reconstruct encrypted bytes from any `k` valid shards.
-10. Decrypt locally with the client-held secret.
+7. Keep repair headroom separate from regular allocation.
+8. Repair failed shard placements by reconstructing encrypted bytes from surviving shards and re-placing missing shard indexes.
+9. Persist scheduler run history and peer health counters through atomic state transitions.
+10. Reconstruct encrypted bytes from any `k` valid shards.
+11. Decrypt locally with the client-held secret.
 
 The public manifest does not contain the encryption key. In the CLI prototype, the key is written to a separate `secret.kryden-secret.json` file so the trust boundary stays explicit.
 
@@ -87,4 +91,4 @@ docs/             Protocol, threat model, and roadmap
 
 ## Status
 
-The current code proves four early invariants: data survives shard loss up to the configured parity budget, online peers can be challenged for signed sampled possession of encrypted shards, failed placements can be repaired without exposing plaintext or client keys, and scheduler state survives process exits. The next step is to replace the local swarm with real transport, durable shard storage, and adversarial audit randomness.
+The current code proves five early invariants: data survives shard loss up to the configured parity budget, online peers can be challenged for signed sampled possession of encrypted shards, failed placements can be repaired without exposing plaintext or client keys, scheduler state survives process exits, and placement/repair respect basic failure-domain and capacity constraints. The next step is to replace the local swarm with real transport, durable shard storage, and adversarial audit randomness.

@@ -10,6 +10,9 @@
 - **Peer proof attribution:** Audit signatures bind the proof transcript to the peer public key in the manifest.
 - **Plaintext-safe repair:** Failed placements can be repaired from encrypted shards without requiring the client content key.
 - **Durable maintenance memory:** Scheduler state records tracked manifests, run history, and peer health across process exits.
+- **Correlated-risk reduction:** Placement and repair prefer distinct failure-domain buckets.
+- **Repair capacity reservation:** Regular writes cannot consume the headroom reserved for repair.
+- **Manifest transition atomicity:** Scheduler-driven manifest updates commit atomically after repair reports are complete.
 
 ## Not Yet Protected
 
@@ -20,6 +23,7 @@
 - **Challenge grinding:** Audit sampling is local and not yet anchored to public randomness.
 - **Shard durability across restarts:** Peer identities can be serialized, but shard payloads are still in-memory only.
 - **State confidentiality:** Scheduler state includes manifests and peer health; production needs access controls and integrity checks around the state store.
+- **Failure-domain truthfulness:** Buckets are self-reported simulator labels. Production needs signed, policy-checked, and abuse-resistant topology claims.
 - **Traffic analysis:** The local simulator does not hide access patterns.
 - **Malicious clients:** Quotas, abuse controls, and spam resistance are not implemented.
 

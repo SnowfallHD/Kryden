@@ -12,6 +12,12 @@ import type { LocalPeerRecord } from "./peer.js";
 import { rankPeersForShard } from "./placement.js";
 import type { RepairReport, ShardRepair, ShardRepairFailure } from "./repair.js";
 
+export interface LocalSwarmOptions {
+  failureDomainCount?: number;
+  reservedBytes?: number;
+  repairHeadroomBytes?: number;
+}
+
 export class LocalSwarm {
   readonly peers: PeerStore[];
 
@@ -31,6 +37,7 @@ export class LocalSwarm {
   storeObjectShards(objectId: string, shards: readonly EncodedShard[]): ShardDescriptor[] {
     const descriptors: ShardDescriptor[] = [];
     const usedPeerIds = new Set<string>();
+    const usedFailureDomains = new Set<string>();
 
     for (const shard of shards) {
       let candidates = rankPeersForShard(
@@ -38,11 +45,18 @@ export class LocalSwarm {
         shard.index,
         this.peers,
         shard.data.length,
-        usedPeerIds
+        {
+          excludedPeerIds: usedPeerIds,
+          avoidedFailureDomains: usedFailureDomains,
+          purpose: "regular"
+        }
       );
 
       if (candidates.length === 0) {
-        candidates = rankPeersForShard(objectId, shard.index, this.peers, shard.data.length);
+        candidates = rankPeersForShard(objectId, shard.index, this.peers, shard.data.length, {
+          avoidedFailureDomains: usedFailureDomains,
+          purpose: "regular"
+        });
       }
 
       const peer = candidates[0];
@@ -50,8 +64,9 @@ export class LocalSwarm {
         throw new Error(`No peer can store shard ${shard.index}`);
       }
 
-      const descriptor = this.storeShardOnPeer(objectId, shard, peer);
+      const descriptor = this.storeShardOnPeer(objectId, shard, peer, "regular");
       usedPeerIds.add(peer.id);
+      usedFailureDomains.add(peer.failureDomain.bucket);
       descriptors.push(descriptor);
     }
 
@@ -178,7 +193,6 @@ export class LocalSwarm {
     const updatedManifest = cloneManifest(manifest);
     const repaired: ShardRepair[] = [];
     const failed: ShardRepairFailure[] = [];
-    const assignedPeerIds = new Set(updatedManifest.shards.map((descriptor) => descriptor.peerId));
 
     for (const audit of failedAudits) {
       const shard = encoded.shards.find((candidate) => candidate.index === audit.shardIndex);
@@ -197,19 +211,23 @@ export class LocalSwarm {
 
       const oldDescriptor = updatedManifest.shards[descriptorIndex];
       const oldPeerId = oldDescriptor.peerId;
-      assignedPeerIds.delete(oldPeerId);
-
-      const avoidPeers = new Set(assignedPeerIds);
+      const remainingDescriptors = updatedManifest.shards.filter((_, index) => index !== descriptorIndex);
+      const avoidPeers = new Set(remainingDescriptors.map((descriptor) => descriptor.peerId));
+      const avoidFailureDomains = new Set(
+        remainingDescriptors
+          .map((descriptor) => descriptor.failureDomain?.bucket)
+          .filter((bucket): bucket is string => typeof bucket === "string")
+      );
       avoidPeers.add(oldPeerId);
       const replacementPeer = this.chooseReplacementPeer(
         updatedManifest.contentId,
         shard,
         avoidPeers,
+        avoidFailureDomains,
         oldPeerId
       );
 
       if (!replacementPeer) {
-        assignedPeerIds.add(oldPeerId);
         failed.push({
           shardIndex: audit.shardIndex,
           peerId: oldPeerId,
@@ -218,9 +236,13 @@ export class LocalSwarm {
         continue;
       }
 
-      const newDescriptor = this.storeShardOnPeer(updatedManifest.contentId, shard, replacementPeer);
+      const newDescriptor = this.storeShardOnPeer(
+        updatedManifest.contentId,
+        shard,
+        replacementPeer,
+        "repair"
+      );
       updatedManifest.shards[descriptorIndex] = newDescriptor;
-      assignedPeerIds.add(replacementPeer.id);
       repaired.push({
         shardIndex: audit.shardIndex,
         oldPeerId,
@@ -249,6 +271,7 @@ export class LocalSwarm {
     objectId: string,
     shard: EncodedShard,
     preferredAvoidPeerIds: ReadonlySet<string>,
+    preferredAvoidFailureDomains: ReadonlySet<string>,
     oldPeerId: string
   ): PeerStore | undefined {
     const preferred = rankPeersForShard(
@@ -256,7 +279,11 @@ export class LocalSwarm {
       shard.index,
       this.peers,
       shard.data.length,
-      preferredAvoidPeerIds
+      {
+        excludedPeerIds: preferredAvoidPeerIds,
+        avoidedFailureDomains: preferredAvoidFailureDomains,
+        purpose: "repair"
+      }
     )[0];
 
     if (preferred) {
@@ -268,17 +295,27 @@ export class LocalSwarm {
       shard.index,
       this.peers,
       shard.data.length,
-      new Set([oldPeerId])
+      {
+        excludedPeerIds: new Set([oldPeerId]),
+        avoidedFailureDomains: preferredAvoidFailureDomains,
+        purpose: "repair"
+      }
     )[0];
   }
 
-  private storeShardOnPeer(objectId: string, shard: EncodedShard, peer: PeerStore): ShardDescriptor {
-    peer.store(objectId, shard);
+  private storeShardOnPeer(
+    objectId: string,
+    shard: EncodedShard,
+    peer: PeerStore,
+    purpose: "regular" | "repair"
+  ): ShardDescriptor {
+    peer.store(objectId, shard, purpose);
     const tree = buildMerkleTree(shard.data, DEFAULT_MERKLE_LEAF_SIZE);
     return {
       index: shard.index,
       peerId: peer.id,
       peerPublicKey: peer.publicKeyPem,
+      failureDomain: { ...peer.failureDomain },
       size: shard.data.length,
       checksum: shard.checksum,
       merkleRoot: tree.root,
@@ -288,13 +325,33 @@ export class LocalSwarm {
   }
 }
 
-export function createLocalSwarm(peerCount: number, capacityBytes: number): LocalSwarm {
+export function createLocalSwarm(
+  peerCount: number,
+  capacityBytes: number,
+  options: LocalSwarmOptions = {}
+): LocalSwarm {
   if (!Number.isInteger(peerCount) || peerCount <= 0) {
     throw new Error("peerCount must be a positive integer");
   }
 
+  const failureDomainCount = options.failureDomainCount ?? peerCount;
+  if (!Number.isInteger(failureDomainCount) || failureDomainCount <= 0) {
+    throw new Error("failureDomainCount must be a positive integer");
+  }
+
   return new LocalSwarm(
-    Array.from({ length: peerCount }, (_, index) => new PeerStore(`peer-${index + 1}`, capacityBytes))
+    Array.from(
+      { length: peerCount },
+      (_, index) =>
+        new PeerStore(`peer-${index + 1}`, capacityBytes, undefined, {
+          reservedBytes: options.reservedBytes,
+          repairHeadroomBytes: options.repairHeadroomBytes,
+          failureDomain: {
+            bucket: `bucket-${(index % failureDomainCount) + 1}`,
+            host: `host-${index + 1}`
+          }
+        })
+    )
   );
 }
 

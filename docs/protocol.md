@@ -18,7 +18,7 @@ Each shard is committed to a Merkle root. The manifest records that root, leaf s
 
 ### 4. Place
 
-The client ranks peers deterministically per object and shard. Placement currently combines rendezvous-style hashing with a capacity bias so fuller peers become less attractive.
+The client ranks peers deterministically per object and shard. Placement combines rendezvous-style hashing with a capacity bias so fuller peers become less attractive. Peers also carry a labeled failure-domain bucket. Placement prefers unused buckets first, then falls back when the swarm does not have enough independent domains.
 
 ### 5. Audit
 
@@ -30,11 +30,11 @@ The client requests shard descriptors from the manifest, verifies shard checksum
 
 ### 7. Repair
 
-Repair starts with an audit pass. Failed shard placements are treated as unavailable. If at least `k` shards can still be fetched, Kryden reconstructs the encrypted object, re-runs erasure coding deterministically, and stores replacement shard indexes on online peers. The content key is not needed for repair.
+Repair starts with an audit pass. Failed shard placements are treated as unavailable. If at least `k` shards can still be fetched, Kryden reconstructs the encrypted object, re-runs erasure coding deterministically, and stores replacement shard indexes on online peers. Repair placement uses peer repair headroom and avoids already-used failure domains where possible. The content key is not needed for repair.
 
 ### 8. Schedule
 
-A background scheduler tracks manifests in a durable JSON state file, runs audit and repair passes, updates manifests after successful repairs, and accumulates peer health history over time. This creates the first feedback loop needed for future reputation and incentive accounting.
+A background scheduler tracks manifests in a durable JSON state file, runs audit and repair passes, updates manifests after successful repairs, and accumulates peer health history over time. State changes are transition-backed: the store records a running transition first, then atomically commits updated manifests and run history together. A crash before commit leaves the previous manifest intact and the transition visible for cleanup or retry.
 
 ## Public Manifest
 

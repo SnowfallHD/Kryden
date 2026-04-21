@@ -51,17 +51,36 @@ export class BackgroundRepairScheduler {
 
     this.running = true;
     const startedAt = now;
+    let transitionId: string | undefined;
     try {
       const trackedObjects = await this.store.getTrackedObjects();
+      const transition = await this.store.beginSchedulerRun(
+        trackedObjects.map((object) => object.contentId),
+        startedAt
+      );
+      transitionId = transition.transitionId;
       const reports = trackedObjects.map((object) =>
         this.swarm.repairObject(object.manifest, this.sampleCount)
       );
       const completedAt = new Date();
-      const run = await this.store.recordSchedulerRun(reports, startedAt, completedAt);
+      const run = await this.store.commitSchedulerRun(
+        transition.transitionId,
+        reports,
+        startedAt,
+        completedAt
+      );
       return {
         run,
         reports
       };
+    } catch (error) {
+      if (transitionId) {
+        await this.store.abandonTransition(
+          transitionId,
+          error instanceof Error ? error.message : "Unknown scheduler error"
+        );
+      }
+      throw error;
     } finally {
       this.running = false;
     }
@@ -88,4 +107,3 @@ export class BackgroundRepairScheduler {
     this.timer = undefined;
   }
 }
-

@@ -21,10 +21,18 @@ export interface ErasureMetadata {
   shardSize: number;
 }
 
+export interface FailureDomain {
+  bucket: string;
+  deviceGroup?: string;
+  host?: string;
+  subnet?: string;
+}
+
 export interface ShardDescriptor {
   index: number;
   peerId: string;
   peerPublicKey?: string;
+  failureDomain?: FailureDomain;
   size: number;
   checksum: string;
   merkleRoot?: string;

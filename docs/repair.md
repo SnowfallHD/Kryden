@@ -13,10 +13,15 @@ Kryden repair is intentionally plaintext-blind.
 
 The repair worker does not need the client content key. That means a future storage coordinator can restore redundancy without gaining the ability to decrypt user data.
 
+## Placement Rules
+
+Repair placement avoids the failed peer and prefers buckets that are not already represented in the updated manifest. If the swarm does not have enough independent buckets, repair falls back to the least-bad available peer instead of refusing a recoverable object.
+
+Repair writes can consume peer repair headroom. Regular writes cannot.
+
 ## Current Limits
 
 - Repair runs synchronously in the local simulator.
 - Failed peers keep their stale in-memory shard data, but the updated manifest stops pointing at them.
 - Peer identities can be exported and restored; shard payloads are not persisted to disk yet.
 - There is no reputation penalty or collateral yet.
-
