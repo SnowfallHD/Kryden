@@ -3,12 +3,15 @@ import type { FailureDomain, ShardDescriptor } from "../storage/manifest.js";
 import { createStorageAuditProof, type StorageAuditChallenge, type StorageAuditProof } from "./audit.js";
 import { createPeerIdentity, type PeerIdentity } from "./identity.js";
 
+export const PEER_RECORD_VERSION = 1;
+
 export interface StoredShard {
   objectId: string;
   shard: EncodedShard;
 }
 
 export interface LocalPeerRecord {
+  version: typeof PEER_RECORD_VERSION;
   peerId: string;
   capacityBytes: number;
   reservedBytes?: number;
@@ -69,6 +72,7 @@ export class PeerStore {
   }
 
   static fromRecord(record: LocalPeerRecord): PeerStore {
+    assertSupportedPeerRecord(record);
     const peer = new PeerStore(record.peerId, record.capacityBytes, {
       peerId: record.peerId,
       publicKeyPem: record.publicKeyPem,
@@ -185,6 +189,7 @@ export class PeerStore {
 
   toRecord(): LocalPeerRecord {
     return {
+      version: PEER_RECORD_VERSION,
       peerId: this.id,
       capacityBytes: this.capacityBytes,
       reservedBytes: this.reservedBytes,
@@ -198,6 +203,12 @@ export class PeerStore {
       privateKeyPem: this.identity.privateKeyPem,
       online: this.online
     };
+  }
+}
+
+export function assertSupportedPeerRecord(record: LocalPeerRecord): void {
+  if (record.version !== PEER_RECORD_VERSION) {
+    throw new Error(`Unsupported peer record version ${String(record.version)}`);
   }
 }
 

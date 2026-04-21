@@ -1,0 +1,1 @@
+export const SQLITE_STATE_SCHEMA_VERSION = 2;

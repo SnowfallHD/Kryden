@@ -1,6 +1,18 @@
 import { createHash } from "node:crypto";
 
-import type { PeerStore, StorePurpose } from "./peer.js";
+import type { StorePurpose } from "./peer.js";
+import type { FailureDomain } from "../storage/manifest.js";
+
+export interface PlacementPeer {
+  id: string;
+  capacityBytes: number;
+  reservedBytes: number;
+  allocatableBytes: number;
+  failureDomain: FailureDomain;
+  regularFreeBytes: number;
+  repairFreeBytes: number;
+  canStore(size: number, purpose?: StorePurpose): boolean;
+}
 
 export interface PeerPlacementStats {
   auditsPassed: number;
@@ -50,13 +62,13 @@ export const DEFAULT_SCORE_WEIGHTS: PeerScoreWeights = {
   repairSuccessBonus: 0.04
 };
 
-export function rankPeersForShard(
+export function rankPeersForShard<TPeer extends PlacementPeer>(
   objectId: string,
   shardIndex: number,
-  peers: readonly PeerStore[],
+  peers: readonly TPeer[],
   shardSize: number,
   options: PlacementOptions = {}
-): PeerStore[] {
+): TPeer[] {
   const excludedPeerIds = options.excludedPeerIds ?? new Set<string>();
   const avoidedFailureDomains = options.avoidedFailureDomains ?? new Set<string>();
   const purpose = options.purpose ?? "regular";
@@ -88,7 +100,7 @@ export function rankPeersForShard(
 function placementScore(
   objectId: string,
   shardIndex: number,
-  peer: PeerStore,
+  peer: PlacementPeer,
   avoidedFailureDomains: ReadonlySet<string>,
   purpose: StorePurpose,
   health: PeerPlacementStats | undefined,
@@ -121,7 +133,7 @@ function placementScore(
 }
 
 function admitsPeer(
-  peer: PeerStore,
+  peer: PlacementPeer,
   shardSize: number,
   purpose: StorePurpose,
   health: PeerPlacementStats | undefined,
@@ -150,7 +162,7 @@ function admitsPeer(
   return true;
 }
 
-function capacityPressureScore(peer: PeerStore, purpose: StorePurpose): number {
+function capacityPressureScore(peer: PlacementPeer, purpose: StorePurpose): number {
   const denominator =
     purpose === "repair" ? peer.capacityBytes - peer.reservedBytes : peer.allocatableBytes;
   const free = purpose === "repair" ? peer.repairFreeBytes : peer.regularFreeBytes;

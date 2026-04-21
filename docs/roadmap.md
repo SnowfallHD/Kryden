@@ -12,11 +12,14 @@ Status: implemented in this prototype.
 
 - Use stable peer identities and signed peer records.
 - Add signed sampled proof-of-storage audits.
+- Add a process-boundary peer runtime for local transport tests.
+- Add membership bootstrap, signed heartbeats, and heartbeat expiry.
 - Add libp2p or another production peer transport.
 - Add content-addressed shard retrieval over the transport.
 - Persist peer stores on disk.
+- Version manifests, peer records, heartbeats, and scheduler schema before widening the protocol.
 
-Status: identity, local peer-record serialization, and local audit proofs are implemented; production transport and durable shard persistence are not.
+Status: identity, local peer-record serialization, local audit proofs, a local HTTP peer runtime, signed heartbeat membership, membership expiry, and explicit format/schema version gates are implemented; production transport and durable shard persistence are not.
 
 ## Milestone 3: Repair And Audit Scheduling
 
@@ -29,10 +32,11 @@ Status: identity, local peer-record serialization, and local audit proofs are im
 - Prove restart behavior after a scheduler process dies mid-transition.
 - Combine domain diversity, capacity, repair headroom, audit history, and repair success into placement admission and scoring.
 - Add repair caps, cooldown windows, and degraded-object retry backoff.
+- Add repair/audit metrics, normalized event logs, and replayable scheduler traces.
 - Anchor audit sampling to public randomness or client-committed randomness.
 - Track peer reliability over time.
 
-Status: local repair, failure-domain placement, capacity headroom, peer-health-aware admission/scoring, anti-thrash scheduler controls, SQLite-backed scheduler transactions, crash-recovery tests, and durable state-backed scheduling are implemented; public-randomness sampling and durable shard persistence are not.
+Status: local repair, failure-domain placement, capacity headroom, peer-health-aware admission/scoring, anti-thrash scheduler controls, SQLite-backed scheduler transactions, crash-recovery tests, durable state-backed scheduling, and scheduler observability are implemented; public-randomness sampling and durable shard persistence are not.
 
 ## Milestone 4: Incentives
 

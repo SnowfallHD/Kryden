@@ -16,6 +16,10 @@ This repo currently implements:
 - Failure-domain-aware placement using labeled peer buckets.
 - Peer capacity accounting with allocatable bytes, reserved bytes, and repair headroom.
 - Local peer swarm simulation with deterministic placement and capacity checks.
+- Local HTTP peer runtimes for process-boundary audit, retrieval, and repair tests.
+- Signed peer heartbeats with bootstrap discovery and membership expiry.
+- Explicit version gates for manifests, peer records, heartbeats, and SQLite state schema.
+- Scheduler observability with metrics, normalized event logs, and replayable run traces.
 - CLI flows for encoding, decoding, and failure simulation.
 - Tests for shard recovery, tamper detection, and peer-loss reconstruction.
 
@@ -54,9 +58,18 @@ Run the durable scheduler simulation:
 npx tsx src/cli.ts simulate-scheduler --state tmp/kryden-scheduler-state.sqlite
 ```
 
-This writes tracked objects, peer health, shard placements, repair events, transitions, and scheduler run history to SQLite.
+This writes tracked objects, peer health, shard placements, repair events, scheduler events, transitions, metrics, replay traces, and scheduler run history to SQLite.
+The state database records `SQLITE_STATE_SCHEMA_VERSION` in both `PRAGMA user_version` and `schema_meta`.
 Use `--failure-domains`, `--reserved-bytes`, and `--repair-headroom-bytes` to exercise correlated-risk and capacity-pressure scenarios.
 Use `--max-repairs-per-run`, `--object-cooldown-ms`, and `--degraded-backoff-base-ms` to exercise anti-thrash behavior.
+
+Run a local peer process:
+
+```bash
+npx tsx src/cli.ts peer-runtime --id peer-1 --capacity-bytes 1048576 --failure-bucket bucket-1
+```
+
+The peer runtime serves shard storage, retrieval, audits, and signed heartbeats over local HTTP. Tests bootstrap membership from those heartbeat endpoints and build a remote swarm from the active registry view.
 
 ## Architecture
 
@@ -75,6 +88,7 @@ Kryden's storage path is:
 11. Decrypt locally with the client-held secret.
 
 The public manifest does not contain the encryption key. In the CLI prototype, the key is written to a separate `secret.kryden-secret.json` file so the trust boundary stays explicit.
+Unsupported manifest, peer-record, heartbeat, and SQLite schema versions are rejected at read/open time.
 
 ## Project Layout
 
@@ -82,7 +96,7 @@ The public manifest does not contain the encryption key. In the CLI prototype, t
 src/crypto/       Client-side encryption and integrity checks
 src/erasure/      Reed-Solomon coding over GF(256)
 src/storage/      Manifest, secret, and Merkle commitment schemas
-src/swarm/        Local peer identity, placement, audit, and repair simulation
+src/swarm/        Local and remote swarm transport, membership, placement, audit, and repair
 src/state/        Durable SQLite scheduler state
 src/scheduler/    Background audit and repair scheduler
 src/cli.ts        Developer CLI
@@ -92,4 +106,4 @@ docs/             Protocol, threat model, and roadmap
 
 ## Status
 
-The current code proves five early invariants: data survives shard loss up to the configured parity budget, online peers can be challenged for signed sampled possession of encrypted shards, failed placements can be repaired without exposing plaintext or client keys, scheduler state survives process exits, and placement/repair respect basic failure-domain and capacity constraints. The next step is to replace the local swarm with real transport, durable shard storage, and adversarial audit randomness.
+The current code proves early invariants: data survives shard loss up to the configured parity budget, online peers can be challenged for signed sampled possession of encrypted shards, failed placements can be repaired without exposing plaintext or client keys, scheduler state survives process exits, placement/repair respect basic failure-domain and capacity constraints, and a remote swarm can audit and repair across separate peer processes discovered through signed membership heartbeats. The next step is to replace the local HTTP runtime with production transport, durable shard storage, and adversarial audit randomness.

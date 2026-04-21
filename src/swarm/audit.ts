@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import type { ShardDescriptor, StoredObjectManifest } from "../storage/manifest.js";
+import { assertSupportedManifest, type ShardDescriptor, type StoredObjectManifest } from "../storage/manifest.js";
 import { createMerkleProof, verifyMerkleProof, type MerkleBranchNode } from "../storage/merkle.js";
 import { fromHex, toHex } from "../util/bytes.js";
 import { signPeerMessage, verifyPeerSignature, type PeerIdentity } from "./identity.js";
@@ -123,6 +123,7 @@ export function verifyStorageAuditProof(
   challenge: StorageAuditChallenge,
   proof: StorageAuditProof
 ): boolean {
+  assertSupportedManifest(manifest);
   requireAuditableDescriptor(descriptor);
 
   if (challenge.protocol !== AUDIT_PROTOCOL || proof.protocol !== AUDIT_PROTOCOL) {

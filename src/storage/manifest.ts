@@ -1,3 +1,5 @@
+export const MANIFEST_VERSION = 1;
+
 export interface EncryptionEnvelope {
   algorithm: "AES-256-GCM";
   nonce: string;
@@ -41,10 +43,16 @@ export interface ShardDescriptor {
 }
 
 export interface StoredObjectManifest {
-  version: 1;
+  version: typeof MANIFEST_VERSION;
   contentId: string;
   createdAt: string;
   encryption: EncryptionEnvelope;
   erasure: ErasureMetadata;
   shards: ShardDescriptor[];
+}
+
+export function assertSupportedManifest(manifest: StoredObjectManifest): void {
+  if (manifest.version !== MANIFEST_VERSION) {
+    throw new Error(`Unsupported manifest version ${String(manifest.version)}`);
+  }
 }

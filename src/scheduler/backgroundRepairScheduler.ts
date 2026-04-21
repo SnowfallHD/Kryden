@@ -5,7 +5,9 @@ import {
   DEFAULT_MAINTENANCE_POLICY,
   SQLiteStateStore,
   type SchedulerMaintenancePolicy,
-  type SchedulerRunRecord
+  type SchedulerRunRecord,
+  type SchedulerSkippedObject,
+  type TrackedObjectRecord
 } from "../state/store.js";
 
 export interface BackgroundRepairSchedulerOptions {
@@ -87,16 +89,27 @@ export class BackgroundRepairScheduler {
     this.running = true;
     const startedAt = now;
     let transitionId: string | undefined;
+    let recoveredTransitionCount = 0;
     try {
       if (this.recoverInterruptedTransitions) {
-        await this.store.recoverInterruptedTransitions(
+        const recoveredTransitions = await this.store.recoverInterruptedTransitions(
           "Recovered interrupted scheduler transition",
           startedAt
         );
+        recoveredTransitionCount = recoveredTransitions.length;
       }
       const state = await this.store.load();
       this.swarm.setPeerPlacementHealth(state.peers);
-      const trackedObjects = await this.store.getEligibleTrackedObjects(startedAt);
+      const allTrackedObjects = await this.store.getTrackedObjects();
+      const trackedObjects = allTrackedObjects.filter((object) => isEligible(object, startedAt));
+      const skippedObjects = allTrackedObjects
+        .filter((object) => !isEligible(object, startedAt))
+        .map((object): SchedulerSkippedObject => ({
+          contentId: object.contentId,
+          nextEligibleAt: object.nextEligibleAt ?? startedAt.toISOString(),
+          reason: "cooldown_or_backoff",
+          consecutiveDegradedRuns: object.consecutiveDegradedRuns
+        }));
       const transition = await this.store.beginSchedulerRun(
         trackedObjects.map((object) => object.contentId),
         startedAt
@@ -122,7 +135,13 @@ export class BackgroundRepairScheduler {
         startedAt,
         completedAt,
         this.swarm.toPeerRecords(),
-        this.maintenancePolicy
+        this.maintenancePolicy,
+        {
+          objectsTracked: allTrackedObjects.length,
+          objectsEligible: trackedObjects.length,
+          skippedObjects,
+          recoveredTransitions: recoveredTransitionCount
+        }
       );
       return {
         run,
@@ -161,4 +180,8 @@ export class BackgroundRepairScheduler {
     clearInterval(this.timer);
     this.timer = undefined;
   }
+}
+
+function isEligible(object: TrackedObjectRecord, now: Date): boolean {
+  return !object.nextEligibleAt || object.nextEligibleAt <= now.toISOString();
 }

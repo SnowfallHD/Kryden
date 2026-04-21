@@ -36,11 +36,27 @@ Repair starts with an audit pass. Failed shard placements are treated as unavail
 
 ### 8. Schedule
 
-A background scheduler tracks manifests in durable SQLite tables, runs audit and repair passes, updates manifests after successful repairs, and accumulates peer health history over time. Each repair cycle commits at one transaction boundary: manifest updates, placement changes, peer health, repair events, transition status, and run history all commit together or roll back together.
+A background scheduler tracks manifests in durable SQLite tables, runs audit and repair passes, updates manifests after successful repairs, and accumulates peer health history over time. Each repair cycle commits at one transaction boundary: manifest updates, placement changes, peer health, repair events, normalized scheduler events, trace JSON, metrics JSON, transition status, and run history all commit together or roll back together.
+
+### 9. Membership
+
+Peer runtimes expose signed heartbeats using `kryden-peer-heartbeat-v1`. A heartbeat commits to the peer id, endpoint URL, public peer record, issue time, expiry time, and monotonic sequence. The membership registry bootstraps from seed endpoints, verifies heartbeat signatures against each peer public key, rejects tampered or stale heartbeats, and prunes peers whose heartbeat expiry has passed. Remote swarms can then be created from the active registry view instead of a hardcoded peer list.
 
 ## Public Manifest
 
 The manifest may be stored publicly because it only contains object metadata, encrypted payload metadata, shard checksums, Merkle commitments, peer public keys, and peer placement descriptors. It does not contain the content key.
+
+Manifests are explicitly versioned with `version: 1`. Clients, audit verification, repair, CLI decoding, and the scheduler reject unsupported manifest versions instead of attempting best-effort reads.
+
+## Versioning And Migrations
+
+- `MANIFEST_VERSION` gates public object manifests.
+- `PEER_RECORD_VERSION` gates local peer records used for stable simulated identity restore.
+- `REMOTE_PEER_RECORD_VERSION` gates peer-runtime records and signed heartbeat membership.
+- `kryden-peer-heartbeat-v1` gates signed liveness heartbeats.
+- `SQLITE_STATE_SCHEMA_VERSION` gates the scheduler state database through both `PRAGMA user_version` and the `schema_meta.state_schema_version` row.
+
+SQLite migration discipline is intentionally strict: opening a database with a newer schema version fails immediately. Older or unversioned prototype databases are brought to the current schema by additive table/column creation, then stamped with the current schema version.
 
 ## Private Secret
 
@@ -48,7 +64,7 @@ The private secret contains the content key. Production Kryden needs a durable k
 
 ## Non-Goals In This Prototype
 
-- No production peer transport.
+- No production peer transport; the current transport is a local HTTP peer-runtime boundary for testing process isolation.
 - No Sybil resistance.
 - No payment settlement.
 - No distributed production repair daemon.

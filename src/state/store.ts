@@ -3,10 +3,18 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import type { FailureDomain, ShardDescriptor, StoredObjectManifest } from "../storage/manifest.js";
+import {
+  assertSupportedManifest,
+  type FailureDomain,
+  type ShardDescriptor,
+  type StoredObjectManifest
+} from "../storage/manifest.js";
 import type { StorageAuditResult } from "../swarm/audit.js";
-import type { LocalPeerRecord } from "../swarm/peer.js";
+import { assertSupportedPeerRecord, type LocalPeerRecord } from "../swarm/peer.js";
 import type { RepairReport, ShardRepair, ShardRepairFailure } from "../swarm/repair.js";
+import { SQLITE_STATE_SCHEMA_VERSION } from "./schema.js";
+
+export { SQLITE_STATE_SCHEMA_VERSION } from "./schema.js";
 
 export interface TrackedObjectRecord {
   contentId: string;
@@ -41,6 +49,40 @@ export interface SchedulerObjectRunRecord {
   failedRepairs: ShardRepairFailure[];
 }
 
+export interface SchedulerRunMetrics {
+  durationMs: number;
+  objectsTracked: number;
+  objectsEligible: number;
+  objectsSkipped: number;
+  objectsAudited: number;
+  shardsAudited: number;
+  auditsPassed: number;
+  auditsFailed: number;
+  repairsSucceeded: number;
+  repairsFailed: number;
+  objectsHealthy: number;
+  objectsRepaired: number;
+  objectsDegraded: number;
+  recoveredTransitions: number;
+}
+
+export interface SchedulerTraceEvent {
+  sequence: number;
+  at: string;
+  type: string;
+  contentId?: string;
+  peerId?: string;
+  shardIndex?: number;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface SchedulerRunTrace {
+  version: 1;
+  runId: string;
+  events: SchedulerTraceEvent[];
+}
+
 export interface SchedulerRunRecord {
   runId: string;
   startedAt: string;
@@ -52,6 +94,8 @@ export interface SchedulerRunRecord {
   repairsSucceeded: number;
   repairsFailed: number;
   objects: SchedulerObjectRunRecord[];
+  metrics: SchedulerRunMetrics;
+  trace: SchedulerRunTrace;
 }
 
 export type StateTransitionStatus = "running" | "committed" | "abandoned";
@@ -72,8 +116,23 @@ export interface SchedulerMaintenancePolicy {
   degradedBackoffMaxMs: number;
 }
 
+export interface SchedulerSkippedObject {
+  contentId: string;
+  nextEligibleAt: string;
+  reason: "cooldown_or_backoff";
+  consecutiveDegradedRuns: number;
+}
+
+export interface SchedulerRunObservabilityInput {
+  objectsTracked: number;
+  objectsEligible: number;
+  skippedObjects?: readonly SchedulerSkippedObject[];
+  recoveredTransitions?: number;
+}
+
 export interface KrydenStateSnapshot {
   version: 1;
+  schemaVersion: number;
   objects: Record<string, TrackedObjectRecord>;
   peers: Record<string, PeerHealthRecord>;
   runs: SchedulerRunRecord[];
@@ -114,6 +173,8 @@ interface SchedulerRunRow {
   repairs_succeeded: number;
   repairs_failed: number;
   objects_json: string;
+  metrics_json: string;
+  trace_json: string;
 }
 
 interface StateTransitionRow {
@@ -155,7 +216,12 @@ export class SQLiteStateStore {
     return this.loadSync();
   }
 
+  schemaVersion(): number {
+    return this.readSchemaVersion();
+  }
+
   async trackObject(manifest: StoredObjectManifest, now = new Date()): Promise<TrackedObjectRecord> {
+    assertSupportedManifest(manifest);
     const timestamp = now.toISOString();
     const existing = this.getTrackedObjectSync(manifest.contentId);
     this.upsertManifest(manifest, existing?.registeredAt ?? timestamp, timestamp);
@@ -172,6 +238,7 @@ export class SQLiteStateStore {
   }
 
   async updateObjectManifest(manifest: StoredObjectManifest, now = new Date()): Promise<void> {
+    assertSupportedManifest(manifest);
     const timestamp = now.toISOString();
     const existing = this.getTrackedObjectSync(manifest.contentId);
     this.upsertManifest(manifest, existing?.registeredAt ?? timestamp, timestamp);
@@ -217,7 +284,8 @@ export class SQLiteStateStore {
     startedAt: Date,
     completedAt: Date,
     peerRecords: readonly LocalPeerRecord[] = [],
-    maintenancePolicy: SchedulerMaintenancePolicy = DEFAULT_MAINTENANCE_POLICY
+    maintenancePolicy: SchedulerMaintenancePolicy = DEFAULT_MAINTENANCE_POLICY,
+    observability: SchedulerRunObservabilityInput = defaultObservabilityInput(reports)
   ): Promise<SchedulerRunRecord> {
     const transition = this.getTransitionSync(transitionId);
     if (!transition) {
@@ -228,7 +296,7 @@ export class SQLiteStateStore {
       throw new Error(`Scheduler transition ${transitionId} is already ${transition.status}`);
     }
 
-    const run = buildRunRecord(reports, startedAt, completedAt);
+    const run = buildRunRecord(reports, startedAt, completedAt, observability);
     this.transaction(() => {
       for (const peer of peerRecords) {
         this.upsertPeerAccounting(peer, completedAt.toISOString());
@@ -253,6 +321,7 @@ export class SQLiteStateStore {
 
       this.throwInjectedCommitFault();
       this.insertSchedulerRun(run);
+      this.insertSchedulerEvents(run);
       this.insertRepairEvents(run);
       this.trimRunHistory();
       this.db.prepare(`
@@ -323,7 +392,8 @@ export class SQLiteStateStore {
     startedAt: Date,
     completedAt: Date,
     peerRecords: readonly LocalPeerRecord[] = [],
-    maintenancePolicy: SchedulerMaintenancePolicy = DEFAULT_MAINTENANCE_POLICY
+    maintenancePolicy: SchedulerMaintenancePolicy = DEFAULT_MAINTENANCE_POLICY,
+    observability: SchedulerRunObservabilityInput = defaultObservabilityInput(reports)
   ): Promise<SchedulerRunRecord> {
     const transition = await this.beginSchedulerRun(
       reports.map((report) => report.updatedManifest.contentId),
@@ -335,7 +405,8 @@ export class SQLiteStateStore {
       startedAt,
       completedAt,
       peerRecords,
-      maintenancePolicy
+      maintenancePolicy,
+      observability
     );
   }
 
@@ -344,7 +415,17 @@ export class SQLiteStateStore {
   }
 
   private migrate(): void {
+    const userVersion = this.readUserVersion();
+    if (userVersion > SQLITE_STATE_SCHEMA_VERSION) {
+      throw new Error(`Unsupported SQLite schema version ${userVersion}`);
+    }
+
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS peers (
         peer_id TEXT PRIMARY KEY,
         public_key_pem TEXT,
@@ -414,7 +495,22 @@ export class SQLiteStateStore {
         audits_failed INTEGER NOT NULL,
         repairs_succeeded INTEGER NOT NULL,
         repairs_failed INTEGER NOT NULL,
-        objects_json TEXT NOT NULL
+        objects_json TEXT NOT NULL,
+        metrics_json TEXT NOT NULL,
+        trace_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS scheduler_events (
+        event_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES scheduler_runs(run_id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        content_id TEXT,
+        peer_id TEXT,
+        shard_index INTEGER,
+        message TEXT NOT NULL,
+        details_json TEXT,
+        UNIQUE(run_id, sequence)
       );
 
       CREATE TABLE IF NOT EXISTS state_transitions (
@@ -440,6 +536,8 @@ export class SQLiteStateStore {
     `);
     this.ensurePeerColumns();
     this.ensureManifestColumns();
+    this.ensureSchedulerRunColumns();
+    this.ensureSchemaVersion();
   }
 
   private ensurePeerColumns(): void {
@@ -482,6 +580,72 @@ export class SQLiteStateStore {
     }
   }
 
+  private ensureSchedulerRunColumns(): void {
+    const existing = new Set(
+      this.db.prepare("PRAGMA table_info(scheduler_runs)").all().map((row) => (row as { name: string }).name)
+    );
+    const columns: Array<[string, string]> = [
+      ["metrics_json", "TEXT NOT NULL DEFAULT '{}'"],
+      ["trace_json", "TEXT NOT NULL DEFAULT '{\"version\":1,\"runId\":\"\",\"events\":[]}'"]
+    ];
+
+    for (const [name, definition] of columns) {
+      if (!existing.has(name)) {
+        this.db.exec(`ALTER TABLE scheduler_runs ADD COLUMN ${name} ${definition}`);
+      }
+    }
+  }
+
+  private ensureSchemaVersion(): void {
+    const storedVersion = this.readSchemaMetaVersion();
+    if (storedVersion > SQLITE_STATE_SCHEMA_VERSION) {
+      throw new Error(`Unsupported SQLite schema version ${storedVersion}`);
+    }
+
+    this.db.prepare(`
+      INSERT INTO schema_meta (key, value)
+      VALUES ('state_schema_version', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(String(SQLITE_STATE_SCHEMA_VERSION));
+    this.db.exec(`PRAGMA user_version = ${SQLITE_STATE_SCHEMA_VERSION}`);
+  }
+
+  private readSchemaVersion(): number {
+    const metaVersion = this.readSchemaMetaVersion();
+    const userVersion = this.readUserVersion();
+    return Math.max(metaVersion, userVersion);
+  }
+
+  private readSchemaMetaVersion(): number {
+    const tableExists = this.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'schema_meta'
+    `).get();
+    if (!tableExists) {
+      return 0;
+    }
+
+    const row = this.db.prepare(`
+      SELECT value FROM schema_meta
+      WHERE key = 'state_schema_version'
+    `).get() as { value: string } | undefined;
+    if (!row) {
+      return 0;
+    }
+
+    const version = Number(row.value);
+    if (!Number.isInteger(version) || version < 0) {
+      throw new Error(`Invalid SQLite schema version ${row.value}`);
+    }
+
+    return version;
+  }
+
+  private readUserVersion(): number {
+    const row = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+    return row.user_version;
+  }
+
   private loadSync(): KrydenStateSnapshot {
     const objects = Object.fromEntries(
       this.getTrackedObjectsSync().map((object) => [object.contentId, object])
@@ -508,6 +672,7 @@ export class SQLiteStateStore {
 
     return {
       version: 1,
+      schemaVersion: this.readSchemaVersion(),
       objects,
       peers,
       runs,
@@ -533,6 +698,7 @@ export class SQLiteStateStore {
   }
 
   private upsertManifest(manifest: StoredObjectManifest, registeredAt: string, updatedAt: string): void {
+    assertSupportedManifest(manifest);
     this.transaction(() => {
       this.db.prepare(`
         INSERT INTO manifests (content_id, manifest_json, registered_at, updated_at)
@@ -582,6 +748,7 @@ export class SQLiteStateStore {
   }
 
   private upsertPeerAccounting(peer: LocalPeerRecord, seenAt: string): void {
+    assertSupportedPeerRecord(peer);
     const domain = peer.failureDomain;
     this.db.prepare(`
       INSERT INTO peers (
@@ -699,8 +866,9 @@ export class SQLiteStateStore {
     this.db.prepare(`
       INSERT INTO scheduler_runs (
         run_id, started_at, completed_at, objects_audited, shards_audited,
-        audits_passed, audits_failed, repairs_succeeded, repairs_failed, objects_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        audits_passed, audits_failed, repairs_succeeded, repairs_failed, objects_json,
+        metrics_json, trace_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       run.runId,
       run.startedAt,
@@ -711,8 +879,31 @@ export class SQLiteStateStore {
       run.auditsFailed,
       run.repairsSucceeded,
       run.repairsFailed,
-      JSON.stringify(run.objects)
+      JSON.stringify(run.objects),
+      JSON.stringify(run.metrics),
+      JSON.stringify(run.trace)
     );
+  }
+
+  private insertSchedulerEvents(run: SchedulerRunRecord): void {
+    for (const event of run.trace.events) {
+      this.db.prepare(`
+        INSERT INTO scheduler_events (
+          event_id, run_id, sequence, event_type, content_id, peer_id,
+          shard_index, message, details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        run.runId,
+        event.sequence,
+        event.type,
+        event.contentId ?? null,
+        event.peerId ?? null,
+        event.shardIndex ?? null,
+        event.message,
+        event.details ? JSON.stringify(event.details) : null
+      );
+    }
   }
 
   private insertRepairEvents(run: SchedulerRunRecord): void {
@@ -860,6 +1051,7 @@ export class SQLiteStateStore {
 export function emptyState(): KrydenStateSnapshot {
   return {
     version: 1,
+    schemaVersion: SQLITE_STATE_SCHEMA_VERSION,
     objects: {},
     peers: {},
     runs: [],
@@ -876,8 +1068,10 @@ export const DEFAULT_MAINTENANCE_POLICY: SchedulerMaintenancePolicy = {
 function buildRunRecord(
   reports: readonly RepairReport<StoredObjectManifest>[],
   startedAt: Date,
-  completedAt: Date
+  completedAt: Date,
+  observability: SchedulerRunObservabilityInput
 ): SchedulerRunRecord {
+  const runId = randomUUID();
   const objects = reports.map((report) => {
     const auditsPassed = report.audits.filter((audit) => audit.ok).length;
     const auditsFailed = report.audits.length - auditsPassed;
@@ -891,25 +1085,189 @@ function buildRunRecord(
       failedRepairs: report.failed
     };
   });
-
-  return {
-    runId: randomUUID(),
-    startedAt: startedAt.toISOString(),
-    completedAt: completedAt.toISOString(),
+  const auditsPassed = objects.reduce((total, object) => total + object.auditsPassed, 0);
+  const auditsFailed = objects.reduce((total, object) => total + object.auditsFailed, 0);
+  const repairsSucceeded = objects.reduce((total, object) => total + object.repaired.length, 0);
+  const repairsFailed = objects.reduce((total, object) => total + object.failedRepairs.length, 0);
+  const metrics: SchedulerRunMetrics = {
+    durationMs: completedAt.getTime() - startedAt.getTime(),
+    objectsTracked: observability.objectsTracked,
+    objectsEligible: observability.objectsEligible,
+    objectsSkipped: observability.skippedObjects?.length ?? 0,
     objectsAudited: objects.length,
     shardsAudited: objects.reduce((total, object) => total + object.auditsPassed + object.auditsFailed, 0),
-    auditsPassed: objects.reduce((total, object) => total + object.auditsPassed, 0),
-    auditsFailed: objects.reduce((total, object) => total + object.auditsFailed, 0),
-    repairsSucceeded: objects.reduce((total, object) => total + object.repaired.length, 0),
-    repairsFailed: objects.reduce((total, object) => total + object.failedRepairs.length, 0),
-    objects
+    auditsPassed,
+    auditsFailed,
+    repairsSucceeded,
+    repairsFailed,
+    objectsHealthy: objects.filter(
+      (object) => object.auditsFailed === 0 && object.repaired.length === 0 && object.failedRepairs.length === 0
+    ).length,
+    objectsRepaired: objects.filter((object) => object.repaired.length > 0).length,
+    objectsDegraded: objects.filter((object) => object.failedRepairs.length > 0).length,
+    recoveredTransitions: observability.recoveredTransitions ?? 0
+  };
+  const trace = buildRunTrace(runId, reports, objects, startedAt, completedAt, metrics, observability);
+
+  return {
+    runId,
+    startedAt: startedAt.toISOString(),
+    completedAt: completedAt.toISOString(),
+    objectsAudited: metrics.objectsAudited,
+    shardsAudited: metrics.shardsAudited,
+    auditsPassed,
+    auditsFailed,
+    repairsSucceeded,
+    repairsFailed,
+    objects,
+    metrics,
+    trace
+  };
+}
+
+function defaultObservabilityInput(
+  reports: readonly RepairReport<StoredObjectManifest>[]
+): SchedulerRunObservabilityInput {
+  return {
+    objectsTracked: reports.length,
+    objectsEligible: reports.length,
+    skippedObjects: [],
+    recoveredTransitions: 0
+  };
+}
+
+function buildRunTrace(
+  runId: string,
+  reports: readonly RepairReport<StoredObjectManifest>[],
+  objects: readonly SchedulerObjectRunRecord[],
+  startedAt: Date,
+  completedAt: Date,
+  metrics: SchedulerRunMetrics,
+  observability: SchedulerRunObservabilityInput
+): SchedulerRunTrace {
+  const events: SchedulerTraceEvent[] = [];
+  const emit = (
+    type: string,
+    message: string,
+    fields: Omit<Partial<SchedulerTraceEvent>, "sequence" | "at" | "type" | "message"> = {}
+  ) => {
+    events.push(removeUndefined({
+      sequence: events.length + 1,
+      at: completedAt.toISOString(),
+      type,
+      message,
+      ...fields
+    }));
+  };
+
+  emit("scheduler.run.started", "Scheduler run started", {
+    details: {
+      runId,
+      startedAt: startedAt.toISOString(),
+      objectsTracked: observability.objectsTracked,
+      objectsEligible: observability.objectsEligible,
+      recoveredTransitions: observability.recoveredTransitions ?? 0
+    }
+  });
+
+  for (const skipped of observability.skippedObjects ?? []) {
+    emit("scheduler.object.skipped", "Object suppressed by cooldown/backoff", {
+      contentId: skipped.contentId,
+      details: {
+        reason: skipped.reason,
+        nextEligibleAt: skipped.nextEligibleAt,
+        consecutiveDegradedRuns: skipped.consecutiveDegradedRuns
+      }
+    });
+  }
+
+  for (let index = 0; index < reports.length; index += 1) {
+    const report = reports[index];
+    const object = objects[index];
+    emit("scheduler.object.audited", "Object audited", {
+      contentId: object.contentId,
+      details: {
+        healthyShards: object.healthyShards,
+        requiredShards: object.requiredShards,
+        auditsPassed: object.auditsPassed,
+        auditsFailed: object.auditsFailed
+      }
+    });
+
+    for (const audit of report.audits) {
+      emit(audit.ok ? "scheduler.audit.passed" : "scheduler.audit.failed", audit.ok ? "Shard audit passed" : "Shard audit failed", {
+        contentId: object.contentId,
+        peerId: audit.peerId,
+        shardIndex: audit.shardIndex,
+        details: audit.ok ? undefined : { error: audit.error ?? "Audit failed" }
+      });
+    }
+
+    for (const repair of object.repaired) {
+      emit("scheduler.repair.succeeded", "Shard repair succeeded", {
+        contentId: object.contentId,
+        peerId: repair.newPeerId,
+        shardIndex: repair.shardIndex,
+        details: {
+          oldPeerId: repair.oldPeerId,
+          newPeerId: repair.newPeerId,
+          reason: repair.reason
+        }
+      });
+    }
+
+    for (const failure of object.failedRepairs) {
+      emit("scheduler.repair.failed", "Shard repair failed or deferred", {
+        contentId: object.contentId,
+        peerId: failure.peerId,
+        shardIndex: failure.shardIndex,
+        details: {
+          reason: failure.reason
+        }
+      });
+    }
+
+    emit(
+      object.failedRepairs.length > 0
+        ? "scheduler.object.degraded"
+        : object.repaired.length > 0
+          ? "scheduler.object.repaired"
+          : "scheduler.object.healthy",
+      object.failedRepairs.length > 0
+        ? "Object remains degraded"
+        : object.repaired.length > 0
+          ? "Object repaired"
+          : "Object healthy",
+      {
+        contentId: object.contentId,
+        details: {
+          repairedShards: object.repaired.length,
+          failedRepairs: object.failedRepairs.length
+        }
+      }
+    );
+  }
+
+  emit("scheduler.run.completed", "Scheduler run completed", {
+    details: {
+      completedAt: completedAt.toISOString(),
+      metrics
+    }
+  });
+
+  return {
+    version: 1,
+    runId,
+    events
   };
 }
 
 function trackedObjectFromRow(row: ManifestRow): TrackedObjectRecord {
+  const manifest = JSON.parse(row.manifest_json) as StoredObjectManifest;
+  assertSupportedManifest(manifest);
   return removeUndefined({
     contentId: row.content_id,
-    manifest: cloneManifest(JSON.parse(row.manifest_json) as StoredObjectManifest),
+    manifest: cloneManifest(manifest),
     registeredAt: row.registered_at,
     updatedAt: row.updated_at,
     consecutiveDegradedRuns: row.consecutive_degraded_runs,
@@ -934,6 +1292,9 @@ function peerHealthFromRow(row: PeerHealthRow): PeerHealthRecord {
 }
 
 function schedulerRunFromRow(row: SchedulerRunRow): SchedulerRunRecord {
+  const objects = JSON.parse(row.objects_json) as SchedulerObjectRunRecord[];
+  const metrics = parseRunMetrics(row.metrics_json, row, objects);
+  const trace = parseRunTrace(row.trace_json, row.run_id);
   return {
     runId: row.run_id,
     startedAt: row.started_at,
@@ -944,7 +1305,50 @@ function schedulerRunFromRow(row: SchedulerRunRow): SchedulerRunRecord {
     auditsFailed: row.audits_failed,
     repairsSucceeded: row.repairs_succeeded,
     repairsFailed: row.repairs_failed,
-    objects: JSON.parse(row.objects_json) as SchedulerObjectRunRecord[]
+    objects,
+    metrics,
+    trace
+  };
+}
+
+function parseRunMetrics(
+  value: string,
+  row: SchedulerRunRow,
+  objects: readonly SchedulerObjectRunRecord[]
+): SchedulerRunMetrics {
+  if (value && value !== "{}") {
+    return JSON.parse(value) as SchedulerRunMetrics;
+  }
+
+  return {
+    durationMs: Date.parse(row.completed_at) - Date.parse(row.started_at),
+    objectsTracked: row.objects_audited,
+    objectsEligible: row.objects_audited,
+    objectsSkipped: 0,
+    objectsAudited: row.objects_audited,
+    shardsAudited: row.shards_audited,
+    auditsPassed: row.audits_passed,
+    auditsFailed: row.audits_failed,
+    repairsSucceeded: row.repairs_succeeded,
+    repairsFailed: row.repairs_failed,
+    objectsHealthy: objects.filter(
+      (object) => object.auditsFailed === 0 && object.repaired.length === 0 && object.failedRepairs.length === 0
+    ).length,
+    objectsRepaired: objects.filter((object) => object.repaired.length > 0).length,
+    objectsDegraded: objects.filter((object) => object.failedRepairs.length > 0).length,
+    recoveredTransitions: 0
+  };
+}
+
+function parseRunTrace(value: string, runId: string): SchedulerRunTrace {
+  if (value && value !== "{\"version\":1,\"runId\":\"\",\"events\":[]}") {
+    return JSON.parse(value) as SchedulerRunTrace;
+  }
+
+  return {
+    version: 1,
+    runId,
+    events: []
   };
 }
 

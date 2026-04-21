@@ -15,13 +15,25 @@ The SQLite state store starts with these tables:
 
 - `peers`: known peers and their latest public key and failure-domain labels.
 - `peer_health`: audit pass/fail counts, consecutive failures, last seen errors, and repair placement counts.
+- `schema_meta`: explicit state schema metadata, including `state_schema_version`.
 - `manifests`: latest tracked manifest for each content id.
 - `shard_placements`: current normalized shard placement rows for every tracked manifest.
-- `scheduler_runs`: bounded run summaries with audit and repair totals.
+- `scheduler_runs`: bounded run summaries with audit and repair totals, metrics JSON, and replay trace JSON.
+- `scheduler_events`: normalized replayable scheduler trace events.
 - `state_transitions`: running, committed, and abandoned maintenance transitions.
 - `repair_events`: per-shard successful and failed repair events.
 
-The state database does not store shard bytes or client content keys.
+The state database does not store shard bytes or client content keys. The store also stamps `PRAGMA user_version` with `SQLITE_STATE_SCHEMA_VERSION`; newer schema versions fail open attempts instead of being migrated blindly.
+
+## Observability
+
+Every committed run records three observability layers:
+
+- `metrics`: aggregate counters for tracked, eligible, skipped, audited, healthy, repaired, and degraded objects, plus audit/repair totals and recovered transition count.
+- `trace`: ordered JSON events embedded in the `scheduler_runs` row. This is the replayable explanation for why each object was skipped, audited, repaired, left degraded, or marked healthy.
+- `scheduler_events`: the same trace events normalized into rows keyed by `run_id` and `sequence` for filtering and inspection.
+
+Trace event types include `scheduler.object.skipped`, `scheduler.audit.failed`, `scheduler.repair.succeeded`, `scheduler.repair.failed`, and `scheduler.object.degraded`.
 
 ## State Transitions
 

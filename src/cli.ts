@@ -6,8 +6,10 @@ import { parseArgs } from "node:util";
 
 import { decryptPayload, encryptPayload } from "./crypto/envelope.js";
 import { decodeErasure, encodeErasure, type EncodedShard } from "./erasure/reedSolomon.js";
+import { assertSupportedManifest } from "./storage/manifest.js";
 import {
   KrydenClient,
+  MANIFEST_VERSION,
   createLocalSwarm,
   type ClientSecret,
   type StoredObjectManifest
@@ -34,6 +36,11 @@ async function main(): Promise<void> {
 
   if (command === "simulate-scheduler") {
     await simulateSchedulerCommand(commandArgs);
+    return;
+  }
+
+  if (command === "peer-runtime") {
+    await peerRuntimeCommand(commandArgs);
     return;
   }
 
@@ -69,7 +76,7 @@ async function encodeCommand(args: string[]): Promise<void> {
   await mkdir(shardsDir, { recursive: true });
 
   const manifest: StoredObjectManifest = {
-    version: 1,
+    version: MANIFEST_VERSION,
     contentId,
     createdAt: new Date().toISOString(),
     encryption: encrypted.envelope,
@@ -109,6 +116,7 @@ async function decodeCommand(args: string[]): Promise<void> {
   }
 
   const manifest = JSON.parse(await readFile(join(objectDir, "manifest.json"), "utf8")) as StoredObjectManifest;
+  assertSupportedManifest(manifest);
   const secret = JSON.parse(await readFile(join(objectDir, "secret.kryden-secret.json"), "utf8")) as ClientSecret;
   const shardFiles = await readdir(join(objectDir, "shards"));
   const shards: EncodedShard[] = [];
@@ -333,6 +341,64 @@ async function simulateSchedulerCommand(args: string[]): Promise<void> {
   );
 }
 
+async function peerRuntimeCommand(args: string[]): Promise<void> {
+  const parsed = parseArgs({
+    args,
+    options: {
+      id: { type: "string" },
+      "capacity-bytes": { type: "string" },
+      host: { type: "string", default: "127.0.0.1" },
+      port: { type: "string", default: "0" },
+      "reserved-bytes": { type: "string", default: "0" },
+      "repair-headroom-bytes": { type: "string" },
+      "heartbeat-ttl-ms": { type: "string" },
+      "failure-bucket": { type: "string" },
+      "failure-host": { type: "string" }
+    }
+  });
+
+  const id = requireString(parsed.values.id, "id");
+  const capacityBytes = parsePositiveInteger(parsed.values["capacity-bytes"], "capacity-bytes");
+  const port = parseNonNegativeInteger(parsed.values.port, "port");
+  const reservedBytes = parseNonNegativeInteger(parsed.values["reserved-bytes"], "reserved-bytes");
+  const repairHeadroomBytes = parseOptionalNonNegativeInteger(
+    parsed.values["repair-headroom-bytes"],
+    "repair-headroom-bytes"
+  );
+  const heartbeatTtlMs = parseOptionalPositiveInteger(
+    parsed.values["heartbeat-ttl-ms"],
+    "heartbeat-ttl-ms"
+  );
+  const host = requireString(parsed.values.host, "host");
+  const [{ startPeerRuntimeServer }] = await Promise.all([
+    import("./swarm/peerRuntime.js")
+  ]);
+  const runtime = await startPeerRuntimeServer({
+    id,
+    capacityBytes,
+    host,
+    port,
+    reservedBytes,
+    repairHeadroomBytes,
+    heartbeatTtlMs,
+    failureDomain: {
+      bucket: typeof parsed.values["failure-bucket"] === "string"
+        ? parsed.values["failure-bucket"]
+        : id,
+      host: typeof parsed.values["failure-host"] === "string"
+        ? parsed.values["failure-host"]
+        : id
+    }
+  });
+
+  console.log(JSON.stringify({
+    ready: true,
+    peerId: runtime.peer.id,
+    url: runtime.url
+  }));
+  await new Promise<void>(() => {});
+}
+
 function parsePositiveInteger(value: string | boolean | undefined, name: string): number {
   if (typeof value !== "string") {
     throw new Error(`${name} must be provided`);
@@ -395,6 +461,7 @@ Usage:
   kryden decode <object-directory> --out <file>
   kryden simulate [--size 1048576] [--peers 12] [--data-shards 6] [--parity-shards 3] [--fail-peers 3] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n] [--skip-repair]
   kryden simulate-scheduler [--state tmp/kryden-scheduler-state.sqlite] [--sample-count 3] [--max-repairs-per-run n] [--object-cooldown-ms n] [--degraded-backoff-base-ms n] [--degraded-backoff-max-ms n] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n]
+  kryden peer-runtime --id peer-1 --capacity-bytes 1048576 [--host 127.0.0.1] [--port 0] [--failure-bucket bucket-1] [--heartbeat-ttl-ms 30000]
 `);
 }
 

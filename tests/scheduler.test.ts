@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import { KrydenClient, createLocalSwarm } from "../src/kryden.js";
 import { BackgroundRepairScheduler } from "../src/scheduler/backgroundRepairScheduler.js";
-import { SQLiteStateStore } from "../src/state/store.js";
+import { SQLITE_STATE_SCHEMA_VERSION, SQLiteStateStore } from "../src/state/store.js";
 import { rankPeersForShard } from "../src/swarm/placement.js";
 
 describe("background audit and repair scheduler", () => {
@@ -98,6 +98,9 @@ describe("background audit and repair scheduler", () => {
     const repairEventCount = db.prepare("SELECT COUNT(*) AS count FROM repair_events").get() as {
       count: number;
     };
+    const schedulerEventCount = db.prepare("SELECT COUNT(*) AS count FROM scheduler_events").get() as {
+      count: number;
+    };
     const peerAccounting = db.prepare(`
       SELECT COUNT(*) AS count FROM peers
       WHERE capacity_bytes IS NOT NULL
@@ -106,25 +109,45 @@ describe("background audit and repair scheduler", () => {
         AND used_bytes IS NOT NULL
         AND allocatable_bytes IS NOT NULL
     `).get() as { count: number };
+    const schemaVersion = db.prepare("PRAGMA user_version").get() as { user_version: number };
+    const schemaMeta = db.prepare(`
+      SELECT value FROM schema_meta
+      WHERE key = 'state_schema_version'
+    `).get() as { value: string };
     db.close();
 
     expect(state.version).toBe(1);
+    expect(state.schemaVersion).toBe(SQLITE_STATE_SCHEMA_VERSION);
+    expect(schemaVersion.user_version).toBe(SQLITE_STATE_SCHEMA_VERSION);
+    expect(Number(schemaMeta.value)).toBe(SQLITE_STATE_SCHEMA_VERSION);
     expect(Object.keys(state.objects)).toEqual([stored.manifest.contentId]);
     expect(state.runs).toHaveLength(1);
     expect(tables).toEqual(
       expect.arrayContaining([
         "peers",
         "peer_health",
+        "schema_meta",
         "manifests",
         "shard_placements",
         "scheduler_runs",
         "state_transitions",
+        "scheduler_events",
         "repair_events"
       ])
     );
     expect(placementCount.count).toBe(stored.manifest.shards.length);
     expect(repairEventCount.count).toBe(0);
+    expect(schedulerEventCount.count).toBeGreaterThan(0);
     expect(peerAccounting.count).toBeGreaterThan(0);
+  });
+
+  it("rejects newer SQLite schemas instead of migrating blindly", async () => {
+    const statePath = await createStatePath();
+    const db = new DatabaseSync(statePath);
+    db.exec(`PRAGMA user_version = ${SQLITE_STATE_SCHEMA_VERSION + 1}`);
+    db.close();
+
+    expect(() => new SQLiteStateStore(statePath)).toThrow(/Unsupported SQLite schema version/i);
   });
 
   it("does not update durable manifests until a transition commits", async () => {
@@ -413,6 +436,67 @@ describe("background audit and repair scheduler", () => {
     expect(second.run.repairsSucceeded).toBe(0);
     expect(third.run.objectsAudited).toBe(1);
     expect(state.objects[stored.manifest.contentId].nextEligibleAt).toBeUndefined();
+  });
+
+  it("persists metrics, event logs, and replayable traces for scheduler decisions", async () => {
+    const statePath = await createStatePath();
+    const swarm = createLocalSwarm(8, 1024 * 1024);
+    const client = new KrydenClient(swarm);
+    const store = new SQLiteStateStore(statePath);
+    const scheduler = new BackgroundRepairScheduler(swarm, store, {
+      sampleCount: 2,
+      objectCooldownMs: 60_000
+    });
+    const stored = client.put(randomBytes(32 * 1024), { dataShards: 4, parityShards: 2 });
+
+    await scheduler.trackObject(stored.manifest);
+    swarm.setPeerOnline(stored.manifest.shards[0].peerId, false);
+
+    const first = await scheduler.runOnce(new Date("2026-04-21T08:00:00.000Z"));
+    const second = await scheduler.runOnce(new Date("2026-04-21T08:00:30.000Z"));
+    const state = await store.load();
+    const db = new DatabaseSync(statePath);
+    const firstEventRows = db.prepare(`
+      SELECT event_type, content_id, peer_id, shard_index, message, details_json
+      FROM scheduler_events
+      WHERE run_id = ?
+      ORDER BY sequence ASC
+    `).all(first.run.runId) as Array<{
+      event_type: string;
+      content_id: string | null;
+      peer_id: string | null;
+      shard_index: number | null;
+      message: string;
+      details_json: string | null;
+    }>;
+    db.close();
+
+    expect(state.runs).toHaveLength(2);
+    expect(first.run.metrics).toMatchObject({
+      objectsTracked: 1,
+      objectsEligible: 1,
+      objectsSkipped: 0,
+      objectsAudited: 1,
+      auditsFailed: 1,
+      repairsSucceeded: 1
+    });
+    expect(first.run.trace.events.map((event) => event.type)).toEqual(
+      expect.arrayContaining([
+        "scheduler.run.started",
+        "scheduler.object.audited",
+        "scheduler.audit.failed",
+        "scheduler.repair.succeeded",
+        "scheduler.object.repaired",
+        "scheduler.run.completed"
+      ])
+    );
+    expect(firstEventRows.map((row) => row.event_type)).toEqual(
+      first.run.trace.events.map((event) => event.type)
+    );
+    expect(second.run.metrics.objectsTracked).toBe(1);
+    expect(second.run.metrics.objectsEligible).toBe(0);
+    expect(second.run.metrics.objectsSkipped).toBe(1);
+    expect(second.run.trace.events.some((event) => event.type === "scheduler.object.skipped")).toBe(true);
   });
 });
 

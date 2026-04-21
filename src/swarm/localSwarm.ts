@@ -1,6 +1,6 @@
 import type { EncodedShard } from "../erasure/reedSolomon.js";
 import { decodeErasure, encodeErasure } from "../erasure/reedSolomon.js";
-import type { ShardDescriptor, StoredObjectManifest } from "../storage/manifest.js";
+import { assertSupportedManifest, type ShardDescriptor, type StoredObjectManifest } from "../storage/manifest.js";
 import { buildMerkleTree, DEFAULT_MERKLE_LEAF_SIZE } from "../storage/merkle.js";
 import {
   createStorageAuditChallenge,
@@ -92,6 +92,7 @@ export class LocalSwarm {
   }
 
   fetchObjectShards(manifest: StoredObjectManifest): EncodedShard[] {
+    assertSupportedManifest(manifest);
     const out: EncodedShard[] = [];
     for (const descriptor of manifest.shards) {
       const peer = this.peers.find((candidate) => candidate.id === descriptor.peerId);
@@ -133,6 +134,7 @@ export class LocalSwarm {
   }
 
   auditObject(manifest: StoredObjectManifest, sampleCount = 3): StorageAuditResult[] {
+    assertSupportedManifest(manifest);
     return manifest.shards.map((descriptor) => {
       const peer = this.peers.find((candidate) => candidate.id === descriptor.peerId);
       if (!peer) {
@@ -182,6 +184,7 @@ export class LocalSwarm {
     sampleCount = 3,
     options: RepairOptions = {}
   ): RepairReport<StoredObjectManifest> {
+    assertSupportedManifest(manifest);
     const maxRepairs = options.maxRepairs ?? Number.POSITIVE_INFINITY;
     if (
       maxRepairs !== Number.POSITIVE_INFINITY &&

@@ -1,6 +1,6 @@
 import { decryptPayload, encryptPayload } from "./crypto/envelope.js";
 import { decodeErasure, encodeErasure, type ErasureConfig } from "./erasure/reedSolomon.js";
-import type { ClientSecret, StoredObjectManifest } from "./storage/manifest.js";
+import { MANIFEST_VERSION, assertSupportedManifest, type ClientSecret, type StoredObjectManifest } from "./storage/manifest.js";
 import type { StorageAuditResult } from "./swarm/audit.js";
 import type { LocalSwarm } from "./swarm/localSwarm.js";
 import type { RepairOptions, RepairReport } from "./swarm/repair.js";
@@ -25,7 +25,7 @@ export class KrydenClient {
 
     return {
       manifest: {
-        version: 1,
+        version: MANIFEST_VERSION,
         contentId,
         createdAt: new Date().toISOString(),
         encryption: encrypted.envelope,
@@ -37,12 +37,14 @@ export class KrydenClient {
   }
 
   get(manifest: StoredObjectManifest, secret: ClientSecret): Buffer {
+    assertSupportedManifest(manifest);
     const shards = this.swarm.fetchObjectShards(manifest);
     const ciphertext = decodeErasure(shards, manifest.erasure);
     return decryptPayload(ciphertext, manifest.encryption, secret);
   }
 
   audit(manifest: StoredObjectManifest, sampleCount = 3): StorageAuditResult[] {
+    assertSupportedManifest(manifest);
     return this.swarm.auditObject(manifest, sampleCount);
   }
 
@@ -51,16 +53,31 @@ export class KrydenClient {
     sampleCount = 3,
     options: RepairOptions = {}
   ): RepairReport<StoredObjectManifest> {
+    assertSupportedManifest(manifest);
     return this.swarm.repairObject(manifest, sampleCount, options);
   }
 }
 
+export { MANIFEST_VERSION } from "./storage/manifest.js";
 export type { ClientSecret, StoredObjectManifest } from "./storage/manifest.js";
 export { createLocalSwarm, createLocalSwarmFromRecords, LocalSwarm } from "./swarm/localSwarm.js";
 export type { LocalSwarmOptions } from "./swarm/localSwarm.js";
+export { RemoteKrydenClient, RemotePeerClient, RemoteSwarm } from "./swarm/remoteSwarm.js";
+export { REMOTE_PEER_RECORD_VERSION, startPeerRuntimeServer } from "./swarm/peerRuntime.js";
+export type { PeerRuntimeOptions, PeerRuntimeServer, RemotePeerRecord } from "./swarm/peerRuntime.js";
+export {
+  DEFAULT_HEARTBEAT_TTL_MS,
+  HEARTBEAT_PROTOCOL,
+  PeerMembershipRegistry,
+  createSignedPeerHeartbeat,
+  verifyPeerHeartbeat
+} from "./swarm/membership.js";
+export type { MembershipBootstrapResult, MembershipEntry, PeerHeartbeat } from "./swarm/membership.js";
 export { createPeerIdentity } from "./swarm/identity.js";
 export { createStorageAuditChallenge, verifyStorageAuditProof } from "./swarm/audit.js";
+export { PEER_RECORD_VERSION } from "./swarm/peer.js";
 export type { LocalPeerRecord } from "./swarm/peer.js";
 export type { RepairOptions, RepairReport, ShardRepair, ShardRepairFailure } from "./swarm/repair.js";
 export { decodeErasure, encodeErasure } from "./erasure/reedSolomon.js";
 export { decryptPayload, encryptPayload } from "./crypto/envelope.js";
+export { SQLITE_STATE_SCHEMA_VERSION } from "./state/schema.js";
