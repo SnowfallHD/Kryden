@@ -1,5 +1,6 @@
 import type { StoredObjectManifest } from "../storage/manifest.js";
-import type { LocalSwarm } from "../swarm/localSwarm.js";
+import type { LocalPeerRecord } from "../swarm/peer.js";
+import type { PeerPlacementStats } from "../swarm/placement.js";
 import type { RepairReport } from "../swarm/repair.js";
 import {
   DEFAULT_MAINTENANCE_POLICY,
@@ -25,8 +26,20 @@ export interface SchedulerRunSummary {
   reports: RepairReport<StoredObjectManifest>[];
 }
 
+export interface SchedulerSwarm {
+  setPeerPlacementHealth(
+    health: ReadonlyMap<string, PeerPlacementStats> | Record<string, PeerPlacementStats>
+  ): void;
+  repairObject(
+    manifest: StoredObjectManifest,
+    sampleCount?: number,
+    options?: { maxRepairs?: number }
+  ): RepairReport<StoredObjectManifest> | Promise<RepairReport<StoredObjectManifest>>;
+  toPeerRecords?(): LocalPeerRecord[];
+}
+
 export class BackgroundRepairScheduler {
-  private readonly swarm: LocalSwarm;
+  private readonly swarm: SchedulerSwarm;
   private readonly store: SQLiteStateStore;
   private readonly intervalMs: number;
   private readonly sampleCount: number;
@@ -37,7 +50,7 @@ export class BackgroundRepairScheduler {
   private running = false;
 
   constructor(
-    swarm: LocalSwarm,
+    swarm: SchedulerSwarm,
     store: SQLiteStateStore,
     options: BackgroundRepairSchedulerOptions = {}
   ) {
@@ -122,7 +135,7 @@ export class BackgroundRepairScheduler {
           remainingRepairs === Number.POSITIVE_INFINITY
             ? Number.POSITIVE_INFINITY
             : Math.max(0, remainingRepairs);
-        const report = this.swarm.repairObject(object.manifest, this.sampleCount, { maxRepairs });
+        const report = await this.swarm.repairObject(object.manifest, this.sampleCount, { maxRepairs });
         reports.push(report);
         if (remainingRepairs !== Number.POSITIVE_INFINITY) {
           remainingRepairs = Math.max(0, remainingRepairs - report.repaired.length);
@@ -134,7 +147,7 @@ export class BackgroundRepairScheduler {
         reports,
         startedAt,
         completedAt,
-        this.swarm.toPeerRecords(),
+        this.swarm.toPeerRecords?.() ?? [],
         this.maintenancePolicy,
         {
           objectsTracked: allTrackedObjects.length,

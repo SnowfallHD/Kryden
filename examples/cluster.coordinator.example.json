@@ -1,0 +1,22 @@
+{
+  "statePath": "cluster/coordinator.sqlite",
+  "authorityPath": "cluster/coordinator.identity.json",
+  "peerEndpoints": [
+    "https://peer-1.example.net:9443",
+    "https://peer-2.example.net:9443",
+    "https://peer-3.example.net:9443",
+    "https://peer-4.example.net:9443",
+    "https://peer-5.example.net:9443"
+  ],
+  "tlsInsecure": false,
+  "dataShards": 4,
+  "parityShards": 2,
+  "scheduler": {
+    "intervalMs": 60000,
+    "sampleCount": 3,
+    "maxRepairsPerRun": 2,
+    "objectCooldownMs": 60000,
+    "degradedBackoffBaseMs": 60000,
+    "degradedBackoffMaxMs": 900000
+  }
+}

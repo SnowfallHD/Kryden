@@ -12,7 +12,9 @@ import {
   KrydenClient,
   MANIFEST_VERSION,
   createLocalSwarm,
+  createPeerIdentity,
   type ClientSecret,
+  type PeerIdentity,
   type StoredObjectManifest
 } from "./kryden.js";
 
@@ -42,6 +44,21 @@ async function main(): Promise<void> {
 
   if (command === "inspect") {
     await inspectCommand(commandArgs);
+    return;
+  }
+
+  if (command === "identity") {
+    await identityCommand(commandArgs);
+    return;
+  }
+
+  if (command === "cluster-put") {
+    await clusterPutCommand(commandArgs);
+    return;
+  }
+
+  if (command === "cluster-scheduler") {
+    await clusterSchedulerCommand(commandArgs);
     return;
   }
 
@@ -523,6 +540,205 @@ async function inspectCommand(args: string[]): Promise<void> {
   throw new Error("Usage: kryden inspect <run|object|peer|degraded> [id] --state <sqlite-path>");
 }
 
+async function identityCommand(args: string[]): Promise<void> {
+  const parsed = parseArgs({
+    args,
+    options: {
+      id: { type: "string" },
+      out: { type: "string", short: "o" }
+    }
+  });
+  const identity = createPeerIdentity(
+    typeof parsed.values.id === "string" ? parsed.values.id : undefined
+  );
+  const payload = {
+    ...identity,
+    publicKeyBase64: Buffer.from(identity.publicKeyPem).toString("base64")
+  };
+
+  if (typeof parsed.values.out === "string") {
+    await writeJson(parsed.values.out, payload);
+    console.log(JSON.stringify({
+      peerId: identity.peerId,
+      identityPath: parsed.values.out,
+      publicKeyBase64: payload.publicKeyBase64
+    }, null, 2));
+    return;
+  }
+
+  printJson(payload);
+}
+
+async function clusterPutCommand(args: string[]): Promise<void> {
+  const parsed = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      config: { type: "string" },
+      state: { type: "string" },
+      authority: { type: "string" },
+      peer: { type: "string", multiple: true },
+      peers: { type: "string" },
+      out: { type: "string", short: "o" },
+      "data-shards": { type: "string" },
+      "parity-shards": { type: "string" },
+      "tls-insecure": { type: "boolean", default: false }
+    }
+  });
+  const config = await loadClusterConfig(parsed.values.config);
+  const inputPath = parsed.positionals[0];
+  if (!inputPath) {
+    throw new Error("Usage: kryden cluster-put <input> --state <db> --authority <identity.json> --peer <url>");
+  }
+
+  applyTlsInsecureFlag(parsed.values["tls-insecure"] === true || config.tlsInsecure === true);
+  const authority = await loadIdentity(requireConfigString(parsed.values.authority, config.authorityPath, "authority"));
+  const peerEndpoints = parsePeerEndpoints(parsed.values.peer, parsed.values.peers, config.peerEndpoints);
+  const statePath = requireConfigString(parsed.values.state, config.statePath, "state");
+  const dataShards = parseOptionalPositiveInteger(parsed.values["data-shards"], "data-shards")
+    ?? config.dataShards
+    ?? 4;
+  const parityShards = parseOptionalPositiveInteger(parsed.values["parity-shards"], "parity-shards")
+    ?? config.parityShards
+    ?? 2;
+  const [{ RemoteKrydenClient }, { RemotePeerClient, RemoteSwarm }, { SQLiteStateStore }] = await Promise.all([
+    import("./swarm/remoteSwarm.js"),
+    import("./swarm/remoteSwarm.js"),
+    import("./state/store.js")
+  ]);
+  const swarm = new RemoteSwarm(
+    peerEndpoints.map((endpoint) => new RemotePeerClient(endpoint, { authority }))
+  );
+  const client = new RemoteKrydenClient(swarm);
+  const plaintext = await readFile(inputPath);
+  const stored = await client.put(plaintext, { dataShards, parityShards });
+  const store = new SQLiteStateStore(statePath);
+  try {
+    await store.trackObject(stored.manifest);
+  } finally {
+    store.close();
+  }
+
+  const output = {
+    statePath,
+    inputPath,
+    manifest: stored.manifest,
+    secret: stored.secret,
+    peerEndpoints
+  };
+  if (typeof parsed.values.out === "string") {
+    await writeJson(parsed.values.out, output);
+    console.log(JSON.stringify({
+      contentId: stored.manifest.contentId,
+      manifestPath: parsed.values.out,
+      statePath
+    }, null, 2));
+    return;
+  }
+
+  printJson(output);
+}
+
+async function clusterSchedulerCommand(args: string[]): Promise<void> {
+  const parsed = parseArgs({
+    args,
+    options: {
+      config: { type: "string" },
+      state: { type: "string" },
+      authority: { type: "string" },
+      peer: { type: "string", multiple: true },
+      peers: { type: "string" },
+      "interval-ms": { type: "string" },
+      "sample-count": { type: "string" },
+      "max-repairs-per-run": { type: "string" },
+      "object-cooldown-ms": { type: "string" },
+      "degraded-backoff-base-ms": { type: "string" },
+      "degraded-backoff-max-ms": { type: "string" },
+      "run-once": { type: "boolean", default: false },
+      "tls-insecure": { type: "boolean", default: false }
+    }
+  });
+  const config = await loadClusterConfig(parsed.values.config);
+  applyTlsInsecureFlag(parsed.values["tls-insecure"] === true || config.tlsInsecure === true);
+  const authority = await loadIdentity(requireConfigString(parsed.values.authority, config.authorityPath, "authority"));
+  const peerEndpoints = parsePeerEndpoints(parsed.values.peer, parsed.values.peers, config.peerEndpoints);
+  const statePath = requireConfigString(parsed.values.state, config.statePath, "state");
+  const intervalMs = parseOptionalPositiveInteger(parsed.values["interval-ms"], "interval-ms")
+    ?? config.scheduler?.intervalMs
+    ?? 60_000;
+  const sampleCount = parseOptionalPositiveInteger(parsed.values["sample-count"], "sample-count")
+    ?? config.scheduler?.sampleCount
+    ?? 3;
+  const maxRepairsPerRun = parseOptionalNonNegativeInteger(
+    parsed.values["max-repairs-per-run"],
+    "max-repairs-per-run"
+  ) ?? config.scheduler?.maxRepairsPerRun;
+  const objectCooldownMs = parseOptionalNonNegativeInteger(
+    parsed.values["object-cooldown-ms"],
+    "object-cooldown-ms"
+  ) ?? config.scheduler?.objectCooldownMs;
+  const degradedBackoffBaseMs = parseOptionalNonNegativeInteger(
+    parsed.values["degraded-backoff-base-ms"],
+    "degraded-backoff-base-ms"
+  ) ?? config.scheduler?.degradedBackoffBaseMs;
+  const degradedBackoffMaxMs = parseOptionalNonNegativeInteger(
+    parsed.values["degraded-backoff-max-ms"],
+    "degraded-backoff-max-ms"
+  ) ?? config.scheduler?.degradedBackoffMaxMs;
+  const [{ BackgroundRepairScheduler }, { PeerMembershipRegistry }, { SQLiteStateStore }] = await Promise.all([
+    import("./scheduler/backgroundRepairScheduler.js"),
+    import("./swarm/membership.js"),
+    import("./state/store.js")
+  ]);
+  const store = new SQLiteStateStore(statePath);
+
+  const runClusterPass = async () => {
+    const registry = new PeerMembershipRegistry();
+    const bootstrap = await registry.bootstrap(peerEndpoints);
+    const swarm = registry.createRemoteSwarm({ authority });
+    const scheduler = new BackgroundRepairScheduler(swarm, store, {
+      sampleCount,
+      maxRepairsPerRun,
+      objectCooldownMs,
+      degradedBackoffBaseMs,
+      degradedBackoffMaxMs
+    });
+    const summary = await scheduler.runOnce();
+    console.log(JSON.stringify({
+      type: "cluster-scheduler-run",
+      statePath,
+      activePeers: bootstrap.active.length,
+      failedPeers: bootstrap.failed,
+      run: summary.run
+    }));
+  };
+
+  const shutdown = () => {
+    store.close();
+    process.exit(0);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+
+  await runClusterPass();
+  if (parsed.values["run-once"] === true) {
+    store.close();
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const timer = setInterval(() => {
+      runClusterPass().catch((error) => {
+        console.error(JSON.stringify({
+          type: "cluster-scheduler-error",
+          message: error instanceof Error ? error.message : String(error)
+        }));
+      });
+    }, intervalMs);
+    process.once("exit", () => clearInterval(timer));
+  });
+}
+
 function parsePositiveInteger(value: string | boolean | undefined, name: string): number {
   if (typeof value !== "string") {
     throw new Error(`${name} must be provided`);
@@ -603,6 +819,81 @@ function objectSummary(object: TrackedObjectRecord): unknown {
   };
 }
 
+interface ClusterConfig {
+  statePath?: string;
+  authorityPath?: string;
+  peerEndpoints?: string[];
+  tlsInsecure?: boolean;
+  dataShards?: number;
+  parityShards?: number;
+  scheduler?: {
+    intervalMs?: number;
+    sampleCount?: number;
+    maxRepairsPerRun?: number;
+    objectCooldownMs?: number;
+    degradedBackoffBaseMs?: number;
+    degradedBackoffMaxMs?: number;
+  };
+}
+
+async function loadClusterConfig(path: string | boolean | undefined): Promise<ClusterConfig> {
+  if (typeof path !== "string") {
+    return {};
+  }
+
+  return JSON.parse(await readFile(path, "utf8")) as ClusterConfig;
+}
+
+async function loadIdentity(path: string): Promise<PeerIdentity> {
+  const parsed = JSON.parse(await readFile(path, "utf8")) as PeerIdentity;
+  if (!parsed.peerId || !parsed.publicKeyPem || !parsed.privateKeyPem) {
+    throw new Error(`Invalid coordinator identity file ${path}`);
+  }
+
+  return parsed;
+}
+
+function parsePeerEndpoints(
+  repeated: string[] | string | boolean | undefined,
+  commaSeparated: string | boolean | undefined,
+  configured: string[] | undefined
+): string[] {
+  const endpoints = [
+    ...(Array.isArray(repeated) ? repeated : typeof repeated === "string" ? [repeated] : []),
+    ...(typeof commaSeparated === "string" ? commaSeparated.split(",") : []),
+    ...(configured ?? [])
+  ]
+    .map((endpoint) => endpoint.trim())
+    .filter((endpoint) => endpoint.length > 0);
+  if (endpoints.length === 0) {
+    throw new Error("At least one peer endpoint is required");
+  }
+
+  return [...new Set(endpoints)];
+}
+
+function requireConfigString(
+  cliValue: string | boolean | undefined,
+  configValue: string | undefined,
+  name: string
+): string {
+  if (typeof cliValue === "string" && cliValue.length > 0) {
+    return cliValue;
+  }
+
+  if (configValue && configValue.length > 0) {
+    return configValue;
+  }
+
+  throw new Error(`${name} must be provided`);
+}
+
+function applyTlsInsecureFlag(enabled: boolean): void {
+  if (enabled) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  }
+}
+
 function printHelp(): void {
   console.log(`Kryden prototype CLI
 
@@ -615,6 +906,9 @@ Usage:
   kryden inspect object <content-id> [--state tmp/kryden-scheduler-state.sqlite]
   kryden inspect peer <peer-id> [--state tmp/kryden-scheduler-state.sqlite]
   kryden inspect degraded [--state tmp/kryden-scheduler-state.sqlite]
+  kryden identity [--id coordinator-1] [--out cluster/coordinator.identity.json]
+  kryden cluster-put <input> --state cluster/coordinator.sqlite --authority cluster/coordinator.identity.json --peer https://peer-1:9443 [--peer ...] [--out cluster/object.json]
+  kryden cluster-scheduler --state cluster/coordinator.sqlite --authority cluster/coordinator.identity.json --peer https://peer-1:9443 [--peer ...] [--interval-ms 60000]
   kryden peer-runtime --id peer-1 --capacity-bytes 1048576 [--host 127.0.0.1] [--port 0] [--failure-bucket bucket-1] [--heartbeat-ttl-ms 30000] [--storage-dir ./tmp/peer-1] [--tls-cert cert.pem --tls-key key.pem] [--trusted-authority-id coordinator-1 --trusted-authority-public-key-base64 ...]
 `);
 }

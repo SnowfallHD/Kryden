@@ -25,6 +25,7 @@ This repo currently implements:
 - Explicit version gates for manifests, peer records, heartbeats, and SQLite state schema.
 - Scheduler observability with metrics, normalized event logs, and replayable run traces.
 - Inspection CLI for scheduler runs, tracked objects, peers, and degraded objects.
+- Cluster-run commands and a runbook for 1 coordinator plus 5-8 persistent TLS peers.
 - CLI flows for encoding, decoding, and failure simulation.
 - Tests for shard recovery, tamper detection, and peer-loss reconstruction.
 
@@ -78,6 +79,14 @@ npx tsx src/cli.ts inspect degraded --state tmp/kryden-scheduler-state.sqlite
 ```
 
 Inspection output is JSON so it can be piped into scripts or dashboards.
+
+For a real multi-machine drill, use [docs/cluster-runbook.md](docs/cluster-runbook.md). The cluster enablers are:
+
+```bash
+node dist/cli.js identity --id coordinator-1 --out cluster/coordinator.identity.json
+node dist/cli.js cluster-put ./test-object.bin --config cluster/coordinator.json --out cluster/test-object.kryden.json
+node dist/cli.js cluster-scheduler --config cluster/coordinator.json
+```
 
 Run a local peer process:
 

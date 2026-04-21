@@ -20,8 +20,9 @@ Status: implemented in this prototype.
 - Version manifests, peer records, heartbeats, and scheduler schema before widening the protocol.
 - Exercise hostile distributed runtime conditions.
 - Add optional TLS transport for local peer runtimes.
+- Add cluster-run scripts, config, and runbook for the first multi-machine deployment.
 
-Status: identity, local peer-record serialization, local audit proofs, a local HTTP/HTTPS peer runtime, signed runtime request envelopes with nonce replay protection, durable peer-runtime shard storage, signed heartbeat membership, membership expiry, explicit format/schema version gates, and hostile distributed runtime tests are implemented; production transport is not.
+Status: identity, local peer-record serialization, local audit proofs, a local HTTP/HTTPS peer runtime, signed runtime request envelopes with nonce replay protection, durable peer-runtime shard storage, signed heartbeat membership, membership expiry, explicit format/schema version gates, hostile distributed runtime tests, and first-cluster deployment enablers are implemented; production transport is not.
 
 ## Milestone 3: Repair And Audit Scheduling
 
