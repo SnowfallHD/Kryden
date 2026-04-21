@@ -63,8 +63,14 @@ export type { ClientSecret, StoredObjectManifest } from "./storage/manifest.js";
 export { createLocalSwarm, createLocalSwarmFromRecords, LocalSwarm } from "./swarm/localSwarm.js";
 export type { LocalSwarmOptions } from "./swarm/localSwarm.js";
 export { RemoteKrydenClient, RemotePeerClient, RemoteSwarm } from "./swarm/remoteSwarm.js";
+export type { RemotePeerClientOptions } from "./swarm/remoteSwarm.js";
 export { REMOTE_PEER_RECORD_VERSION, startPeerRuntimeServer } from "./swarm/peerRuntime.js";
-export type { PeerRuntimeOptions, PeerRuntimeServer, RemotePeerRecord } from "./swarm/peerRuntime.js";
+export type {
+  PeerRuntimeOptions,
+  PeerRuntimeServer,
+  PeerRuntimeTlsOptions,
+  RemotePeerRecord
+} from "./swarm/peerRuntime.js";
 export {
   DEFAULT_HEARTBEAT_TTL_MS,
   HEARTBEAT_PROTOCOL,
@@ -74,8 +80,22 @@ export {
 } from "./swarm/membership.js";
 export type { MembershipBootstrapResult, MembershipEntry, PeerHeartbeat } from "./swarm/membership.js";
 export { createPeerIdentity } from "./swarm/identity.js";
+export type { PeerIdentity } from "./swarm/identity.js";
+export {
+  DEFAULT_PEER_REQUEST_TTL_MS,
+  PEER_REQUEST_PROTOCOL,
+  PeerRequestReplayProtector,
+  createSignedPeerRequest,
+  verifySignedPeerRequest
+} from "./swarm/requestAuth.js";
+export type {
+  PeerRequestAuthority,
+  PeerRequestAuthorityRole,
+  PeerRequestOperation,
+  SignedPeerRequestEnvelope
+} from "./swarm/requestAuth.js";
 export { createStorageAuditChallenge, verifyStorageAuditProof } from "./swarm/audit.js";
-export { PEER_RECORD_VERSION } from "./swarm/peer.js";
+export { DURABLE_SHARD_RECORD_VERSION, PEER_RECORD_VERSION } from "./swarm/peer.js";
 export type { LocalPeerRecord } from "./swarm/peer.js";
 export type { RepairOptions, RepairReport, ShardRepair, ShardRepairFailure } from "./swarm/repair.js";
 export { decodeErasure, encodeErasure } from "./erasure/reedSolomon.js";

@@ -1,5 +1,15 @@
 #!/usr/bin/env node
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { readFileSync } from "node:fs";
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse
+} from "node:http";
+import {
+  createServer as createHttpsServer,
+  type Server as HttpsServer
+} from "node:https";
 import { pathToFileURL } from "node:url";
 
 import type { EncodedShard } from "../erasure/reedSolomon.js";
@@ -7,6 +17,14 @@ import type { ShardDescriptor } from "../storage/manifest.js";
 import type { StorageAuditChallenge } from "./audit.js";
 import { DEFAULT_HEARTBEAT_TTL_MS, createSignedPeerHeartbeat } from "./membership.js";
 import { PeerStore, type PeerStoreOptions, type StorePurpose } from "./peer.js";
+import {
+  PeerRequestAuthError,
+  PeerRequestReplayProtector,
+  verifySignedPeerRequest,
+  type PeerRequestAuthority,
+  type PeerRequestOperation,
+  type SignedPeerRequestEnvelope
+} from "./requestAuth.js";
 
 export const REMOTE_PEER_RECORD_VERSION = 1;
 
@@ -16,11 +34,18 @@ export interface PeerRuntimeOptions extends PeerStoreOptions {
   host?: string;
   port?: number;
   heartbeatTtlMs?: number;
+  trustedAuthorities?: readonly PeerRequestAuthority[];
+  tls?: PeerRuntimeTlsOptions;
+}
+
+export interface PeerRuntimeTlsOptions {
+  certPem: string;
+  keyPem: string;
 }
 
 export interface PeerRuntimeServer {
   peer: PeerStore;
-  server: Server;
+  server: HttpServer | HttpsServer;
   url: string;
   close(): Promise<void>;
 }
@@ -66,16 +91,21 @@ export async function startPeerRuntimeServer(options: PeerRuntimeOptions): Promi
   const peer = new PeerStore(options.id, options.capacityBytes, undefined, {
     reservedBytes: options.reservedBytes,
     repairHeadroomBytes: options.repairHeadroomBytes,
-    failureDomain: options.failureDomain
+    failureDomain: options.failureDomain,
+    storageDir: options.storageDir
   });
   let runtimeUrl = "";
   let heartbeatSequence = 0;
+  const requestReplayProtector = new PeerRequestReplayProtector();
+  const trustedAuthorities = normalizeTrustedAuthorities(options.trustedAuthorities ?? []);
 
-  const server = createServer(async (request, response) => {
+  const requestHandler = async (request: IncomingMessage, response: ServerResponse) => {
     try {
       await routePeerRequest({
         peer,
         heartbeatTtlMs,
+        trustedAuthorities,
+        requestReplayProtector,
         endpoint: () => runtimeUrl,
         nextHeartbeatSequence: () => {
           heartbeatSequence += 1;
@@ -83,11 +113,14 @@ export async function startPeerRuntimeServer(options: PeerRuntimeOptions): Promi
         }
       }, request, response);
     } catch (error) {
-      sendJson(response, 500, {
+      sendJson(response, error instanceof PeerRequestAuthError ? error.statusCode : 500, {
         error: error instanceof Error ? error.message : "Unknown peer runtime error"
       });
     }
-  });
+  };
+  const server = options.tls
+    ? createHttpsServer({ cert: options.tls.certPem, key: options.tls.keyPem }, requestHandler)
+    : createHttpServer(requestHandler);
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -101,7 +134,7 @@ export async function startPeerRuntimeServer(options: PeerRuntimeOptions): Promi
   if (!address || typeof address === "string") {
     throw new Error("Peer runtime did not bind to a TCP address");
   }
-  runtimeUrl = `http://${host}:${address.port}`;
+  runtimeUrl = `${options.tls ? "https" : "http"}://${host}:${address.port}`;
 
   return {
     peer,
@@ -117,6 +150,8 @@ export async function startPeerRuntimeServer(options: PeerRuntimeOptions): Promi
 interface PeerRuntimeContext {
   peer: PeerStore;
   heartbeatTtlMs: number;
+  trustedAuthorities: readonly PeerRequestAuthority[];
+  requestReplayProtector: PeerRequestReplayProtector;
   endpoint(): string;
   nextHeartbeatSequence(): number;
 }
@@ -148,35 +183,41 @@ async function routePeerRequest(
   }
 
   if (request.method === "POST" && request.url === "/store") {
-    const body = await readJson<StoreRequest>(request);
+    const authorized = await readAuthorizedJson<StoreRequest>(context, request, ["store", "repair"]);
+    const body = authorized.body;
+    const purpose = body.purpose ?? "regular";
+    if ((purpose === "repair") !== (authorized.operation === "repair")) {
+      throw new PeerRequestAuthError("Signed request operation does not match store purpose", 403);
+    }
+
     peer.store(body.objectId, shardFromWire(body.shard), body.purpose ?? "regular");
     sendJson(response, 200, { peer: publicPeerRecord(peer) });
     return;
   }
 
   if (request.method === "POST" && request.url === "/retrieve") {
-    const body = await readJson<RetrieveRequest>(request);
+    const { body } = await readAuthorizedJson<RetrieveRequest>(context, request, ["retrieve"]);
     const shard = peer.retrieve(body.objectId, body.shardIndex);
     sendJson(response, 200, { shard: shard ? shardToWire(shard) : null });
     return;
   }
 
   if (request.method === "POST" && request.url === "/audit") {
-    const body = await readJson<AuditRequest>(request);
+    const { body } = await readAuthorizedJson<AuditRequest>(context, request, ["audit"]);
     const proof = peer.respondToAudit(body.challenge, body.descriptor);
     sendJson(response, 200, { proof: proof ?? null });
     return;
   }
 
   if (request.method === "POST" && request.url === "/online") {
-    const body = await readJson<OnlineRequest>(request);
+    const { body } = await readAuthorizedJson<OnlineRequest>(context, request, ["admin"]);
     peer.online = body.online;
     sendJson(response, 200, { peer: publicPeerRecord(peer) });
     return;
   }
 
   if (request.method === "POST" && request.url === "/corrupt") {
-    const body = await readJson<CorruptRequest>(request);
+    const { body } = await readAuthorizedJson<CorruptRequest>(context, request, ["admin"]);
     peer.corruptShard(body.objectId, body.shardIndex);
     sendJson(response, 200, { peer: publicPeerRecord(peer) });
     return;
@@ -257,6 +298,48 @@ async function readJson<T>(request: IncomingMessage): Promise<T> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
 }
 
+async function readAuthorizedJson<T>(
+  context: PeerRuntimeContext,
+  request: IncomingMessage,
+  expectedOperations: readonly PeerRequestOperation[]
+): Promise<{ body: T; operation: PeerRequestOperation }> {
+  if (context.trustedAuthorities.length === 0) {
+    throw new PeerRequestAuthError("No trusted request authorities are configured", 403);
+  }
+
+  const envelope = await readJson<SignedPeerRequestEnvelope<T>>(request);
+  verifySignedPeerRequest(envelope, {
+    trustedAuthorities: context.trustedAuthorities,
+    expectedPath: request.url ?? "",
+    expectedOperations,
+    replayProtector: context.requestReplayProtector
+  });
+
+  return {
+    body: envelope.body,
+    operation: envelope.operation
+  };
+}
+
+function normalizeTrustedAuthorities(authorities: readonly PeerRequestAuthority[]): PeerRequestAuthority[] {
+  return authorities.map((authority) => {
+    if (!authority.id) {
+      throw new Error("Trusted request authority id is required");
+    }
+
+    if (!authority.publicKeyPem) {
+      throw new Error(`Trusted request authority ${authority.id} is missing a public key`);
+    }
+
+    return {
+      id: authority.id,
+      role: authority.role,
+      publicKeyPem: authority.publicKeyPem,
+      allowedOperations: authority.allowedOperations ? [...authority.allowedOperations] : undefined
+    };
+  });
+}
+
 function sendJson(response: ServerResponse, statusCode: number, body: unknown): void {
   response.writeHead(statusCode, { "content-type": "application/json" });
   response.end(JSON.stringify(body));
@@ -297,6 +380,19 @@ function parseCliOptions(argv: readonly string[]): PeerRuntimeOptions {
   const heartbeatTtlMs = values.has("heartbeat-ttl-ms")
     ? Number(values.get("heartbeat-ttl-ms"))
     : undefined;
+  const storageDir = values.get("storage-dir");
+  const trustedAuthorityId = values.get("trusted-authority-id");
+  const trustedAuthorityPublicKeyBase64 = values.get("trusted-authority-public-key-base64");
+  const tlsCert = values.get("tls-cert");
+  const tlsKey = values.get("tls-key");
+  if (Boolean(trustedAuthorityId) !== Boolean(trustedAuthorityPublicKeyBase64)) {
+    throw new Error("--trusted-authority-id and --trusted-authority-public-key-base64 must be provided together");
+  }
+
+  if (Boolean(tlsCert) !== Boolean(tlsKey)) {
+    throw new Error("--tls-cert and --tls-key must be provided together");
+  }
+
   const bucket = values.get("failure-bucket") ?? id;
   const host = values.get("host") ?? "127.0.0.1";
 
@@ -308,6 +404,20 @@ function parseCliOptions(argv: readonly string[]): PeerRuntimeOptions {
     reservedBytes,
     repairHeadroomBytes,
     heartbeatTtlMs,
+    storageDir,
+    tls: tlsCert && tlsKey
+      ? {
+          certPem: readFileSync(tlsCert, "utf8"),
+          keyPem: readFileSync(tlsKey, "utf8")
+        }
+      : undefined,
+    trustedAuthorities: trustedAuthorityId && trustedAuthorityPublicKeyBase64
+      ? [{
+          id: trustedAuthorityId,
+          role: "coordinator",
+          publicKeyPem: Buffer.from(trustedAuthorityPublicKeyBase64, "base64").toString("utf8")
+        }]
+      : [],
     failureDomain: {
       bucket,
       host: values.get("failure-host") ?? id

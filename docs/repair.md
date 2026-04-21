@@ -30,6 +30,6 @@ Repair writes can consume peer repair headroom. Regular writes cannot. Within th
 ## Current Limits
 
 - Repair runs synchronously in the local simulator.
-- Failed peers keep their stale in-memory shard data, but the updated manifest stops pointing at them.
-- Peer identities can be exported and restored; shard payloads are not persisted to disk yet.
+- Failed peers keep their stale shard data, but the updated manifest stops pointing at them.
+- Durable peer shard storage is available for peer runtimes when a storage directory is configured; unconfigured local simulator peers remain memory-only.
 - There is no reputation penalty or collateral yet.

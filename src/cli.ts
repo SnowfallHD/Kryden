@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import { decryptPayload, encryptPayload } from "./crypto/envelope.js";
 import { decodeErasure, encodeErasure, type EncodedShard } from "./erasure/reedSolomon.js";
 import { assertSupportedManifest } from "./storage/manifest.js";
+import type { TrackedObjectRecord } from "./state/store.js";
 import {
   KrydenClient,
   MANIFEST_VERSION,
@@ -36,6 +37,11 @@ async function main(): Promise<void> {
 
   if (command === "simulate-scheduler") {
     await simulateSchedulerCommand(commandArgs);
+    return;
+  }
+
+  if (command === "inspect") {
+    await inspectCommand(commandArgs);
     return;
   }
 
@@ -353,7 +359,12 @@ async function peerRuntimeCommand(args: string[]): Promise<void> {
       "repair-headroom-bytes": { type: "string" },
       "heartbeat-ttl-ms": { type: "string" },
       "failure-bucket": { type: "string" },
-      "failure-host": { type: "string" }
+      "failure-host": { type: "string" },
+      "storage-dir": { type: "string" },
+      "tls-cert": { type: "string" },
+      "tls-key": { type: "string" },
+      "trusted-authority-id": { type: "string" },
+      "trusted-authority-public-key-base64": { type: "string" }
     }
   });
 
@@ -370,6 +381,20 @@ async function peerRuntimeCommand(args: string[]): Promise<void> {
     "heartbeat-ttl-ms"
   );
   const host = requireString(parsed.values.host, "host");
+  const trustedAuthorityId = parsed.values["trusted-authority-id"];
+  const trustedAuthorityPublicKeyBase64 = parsed.values["trusted-authority-public-key-base64"];
+  if (
+    (typeof trustedAuthorityId === "string") !==
+    (typeof trustedAuthorityPublicKeyBase64 === "string")
+  ) {
+    throw new Error("trusted-authority-id and trusted-authority-public-key-base64 must be provided together");
+  }
+  const tlsCert = parsed.values["tls-cert"];
+  const tlsKey = parsed.values["tls-key"];
+  if ((typeof tlsCert === "string") !== (typeof tlsKey === "string")) {
+    throw new Error("tls-cert and tls-key must be provided together");
+  }
+
   const [{ startPeerRuntimeServer }] = await Promise.all([
     import("./swarm/peerRuntime.js")
   ]);
@@ -381,6 +406,22 @@ async function peerRuntimeCommand(args: string[]): Promise<void> {
     reservedBytes,
     repairHeadroomBytes,
     heartbeatTtlMs,
+    storageDir: typeof parsed.values["storage-dir"] === "string"
+      ? parsed.values["storage-dir"]
+      : undefined,
+    tls: typeof tlsCert === "string" && typeof tlsKey === "string"
+      ? {
+          certPem: await readFile(tlsCert, "utf8"),
+          keyPem: await readFile(tlsKey, "utf8")
+        }
+      : undefined,
+    trustedAuthorities: typeof trustedAuthorityId === "string" && typeof trustedAuthorityPublicKeyBase64 === "string"
+      ? [{
+          id: trustedAuthorityId,
+          role: "coordinator",
+          publicKeyPem: Buffer.from(trustedAuthorityPublicKeyBase64, "base64").toString("utf8")
+        }]
+      : [],
     failureDomain: {
       bucket: typeof parsed.values["failure-bucket"] === "string"
         ? parsed.values["failure-bucket"]
@@ -397,6 +438,89 @@ async function peerRuntimeCommand(args: string[]): Promise<void> {
     url: runtime.url
   }));
   await new Promise<void>(() => {});
+}
+
+async function inspectCommand(args: string[]): Promise<void> {
+  const parsed = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      state: { type: "string", default: "tmp/kryden-scheduler-state.sqlite" }
+    }
+  });
+  const target = parsed.positionals[0];
+  const id = parsed.positionals[1];
+  const statePath = requireString(parsed.values.state, "state");
+  const { SQLiteStateStore } = await import("./state/store.js");
+  const store = new SQLiteStateStore(statePath);
+
+  try {
+    if (target === "run") {
+      const runId = id ?? "latest";
+      const run = await store.getSchedulerRun(runId);
+      if (!run) {
+        throw new Error(`Scheduler run ${runId} was not found`);
+      }
+
+      printJson({
+        type: "scheduler-run",
+        statePath,
+        run
+      });
+      return;
+    }
+
+    if (target === "object") {
+      if (!id) {
+        throw new Error("Usage: kryden inspect object <content-id> --state <sqlite-path>");
+      }
+
+      const object = await store.getTrackedObject(id);
+      if (!object) {
+        throw new Error(`Tracked object ${id} was not found`);
+      }
+
+      printJson({
+        type: "tracked-object",
+        statePath,
+        object: objectSummary(object)
+      });
+      return;
+    }
+
+    if (target === "peer") {
+      if (!id) {
+        throw new Error("Usage: kryden inspect peer <peer-id> --state <sqlite-path>");
+      }
+
+      const peer = await store.getPeerInspection(id);
+      if (!peer) {
+        throw new Error(`Peer ${id} was not found`);
+      }
+
+      printJson({
+        type: "peer",
+        statePath,
+        peer
+      });
+      return;
+    }
+
+    if (target === "degraded") {
+      const degraded = await store.getDegradedObjects();
+      printJson({
+        type: "degraded-objects",
+        statePath,
+        count: degraded.length,
+        objects: degraded.map(objectSummary)
+      });
+      return;
+    }
+  } finally {
+    store.close();
+  }
+
+  throw new Error("Usage: kryden inspect <run|object|peer|degraded> [id] --state <sqlite-path>");
 }
 
 function parsePositiveInteger(value: string | boolean | undefined, name: string): number {
@@ -453,6 +577,32 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value, null, 2));
+}
+
+function objectSummary(object: TrackedObjectRecord): unknown {
+  return {
+    contentId: object.contentId,
+    registeredAt: object.registeredAt,
+    updatedAt: object.updatedAt,
+    consecutiveDegradedRuns: object.consecutiveDegradedRuns,
+    nextEligibleAt: object.nextEligibleAt,
+    lastSchedulerRunAt: object.lastSchedulerRunAt,
+    lastRepairAt: object.lastRepairAt,
+    erasure: object.manifest.erasure,
+    shardCount: object.manifest.shards.length,
+    placements: object.manifest.shards.map((descriptor) => ({
+      shardIndex: descriptor.index,
+      peerId: descriptor.peerId,
+      failureDomain: descriptor.failureDomain,
+      size: descriptor.size,
+      checksum: descriptor.checksum,
+      merkleRoot: descriptor.merkleRoot
+    }))
+  };
+}
+
 function printHelp(): void {
   console.log(`Kryden prototype CLI
 
@@ -461,7 +611,11 @@ Usage:
   kryden decode <object-directory> --out <file>
   kryden simulate [--size 1048576] [--peers 12] [--data-shards 6] [--parity-shards 3] [--fail-peers 3] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n] [--skip-repair]
   kryden simulate-scheduler [--state tmp/kryden-scheduler-state.sqlite] [--sample-count 3] [--max-repairs-per-run n] [--object-cooldown-ms n] [--degraded-backoff-base-ms n] [--degraded-backoff-max-ms n] [--failure-domains 12] [--reserved-bytes 0] [--repair-headroom-bytes n]
-  kryden peer-runtime --id peer-1 --capacity-bytes 1048576 [--host 127.0.0.1] [--port 0] [--failure-bucket bucket-1] [--heartbeat-ttl-ms 30000]
+  kryden inspect run [run-id|latest] [--state tmp/kryden-scheduler-state.sqlite]
+  kryden inspect object <content-id> [--state tmp/kryden-scheduler-state.sqlite]
+  kryden inspect peer <peer-id> [--state tmp/kryden-scheduler-state.sqlite]
+  kryden inspect degraded [--state tmp/kryden-scheduler-state.sqlite]
+  kryden peer-runtime --id peer-1 --capacity-bytes 1048576 [--host 127.0.0.1] [--port 0] [--failure-bucket bucket-1] [--heartbeat-ttl-ms 30000] [--storage-dir ./tmp/peer-1] [--tls-cert cert.pem --tls-key key.pem] [--trusted-authority-id coordinator-1 --trusted-authority-public-key-base64 ...]
 `);
 }
 

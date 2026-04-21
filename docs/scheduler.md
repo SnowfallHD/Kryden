@@ -35,6 +35,14 @@ Every committed run records three observability layers:
 
 Trace event types include `scheduler.object.skipped`, `scheduler.audit.failed`, `scheduler.repair.succeeded`, `scheduler.repair.failed`, and `scheduler.object.degraded`.
 
+The CLI exposes the same state through operator inspection commands:
+
+- `kryden inspect run latest --state <db>` prints the latest run, metrics, and replay trace.
+- `kryden inspect run <run-id> --state <db>` prints a specific run.
+- `kryden inspect object <content-id> --state <db>` prints manifest placement, repair cooldown/backoff state, and shard commitments.
+- `kryden inspect peer <peer-id> --state <db>` prints peer accounting, health counters, current placements, and repair events.
+- `kryden inspect degraded --state <db>` lists objects with active degraded/backoff state.
+
 ## State Transitions
 
 Scheduler repair is one SQLite transaction boundary.
@@ -75,7 +83,7 @@ The suppression state lives on the `manifests` row next to the latest committed 
 
 ## Current Limits
 
-- Scheduler state is durable SQLite, but shard payloads are still in memory.
-- A restarted process can reload state, but cannot repair until shard persistence or real peer transport exists.
+- Scheduler state is durable SQLite, and peer runtimes can now persist shard payloads when configured with a storage directory.
+- Local simulator peers remain memory-only unless they are replaced by configured peer runtimes.
 - Timer errors are swallowed so later intervals can try again; production observability still needs structured logging.
 - Audit randomness is local; production should anchor challenge selection to public or committed randomness.

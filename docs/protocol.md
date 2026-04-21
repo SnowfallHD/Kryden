@@ -16,29 +16,39 @@ Encrypted bytes are split into `k` data shards. Kryden then generates `m` parity
 
 Each shard is committed to a Merkle root. The manifest records that root, leaf size, and leaf count. A client can later challenge a peer to reveal sampled leaves plus Merkle branches without downloading the whole shard.
 
-### 4. Place
+### 4. Authorize
+
+The current control plane is explicitly coordinator-authoritative. Peers expose public health, record, and heartbeat endpoints, but protected shard operations require a signed `kryden-peer-request-v1` envelope from a configured authority key. The envelope binds the authority id, authority role, operation, HTTP path, body digest, issue time, expiry time, and nonce. Peers reject unknown authorities, mismatched operations, stale timestamps, invalid signatures, and reused nonces.
+
+Coordinator authorities may store, repair, retrieve, audit, and perform admin operations. Owner authorities may store, repair, retrieve, and audit unless the peer is configured with a narrower operation allowlist. This keeps the prototype honest: the scheduler/coordinator is trusted today, while the data plane still enforces request attribution and replay resistance.
+
+### 5. Transport
+
+The local peer runtime can serve either HTTP or HTTPS. Passing TLS certificate and key material starts the runtime as HTTPS and makes heartbeats advertise an `https://` endpoint. Request signatures still authenticate the operation transcript; TLS protects transport confidentiality and integrity between processes. These are separate layers: signed envelopes do not hide traffic, and TLS does not replace Kryden request authorization.
+
+### 6. Place
 
 The client ranks peers deterministically per object and shard. Placement combines rendezvous-style hashing, failure-domain diversity, capacity pressure, repair headroom pressure, audit failure rate, consecutive failures, and prior repair success into one score. Peers also carry a labeled failure-domain bucket. Placement prefers unused buckets first, then falls back when the swarm does not have enough independent domains.
 
 Admission control runs before scoring. A peer must be online, have enough regular or repair capacity for the requested write purpose, and stay below the configured consecutive-failure and failure-rate thresholds.
 
-### 5. Audit
+### 7. Audit
 
 Each peer has an Ed25519 identity. During an audit, the client sends an object id, shard index, nonce, and deterministic sampled leaf indices. The peer returns leaf bytes, Merkle branches, and a signature over the full transcript. The client verifies the signature against the peer public key in the manifest and verifies every sampled leaf against the shard Merkle root.
 
-### 6. Retrieve
+### 8. Retrieve
 
 The client requests shard descriptors from the manifest, verifies shard checksums, reconstructs encrypted bytes from any `k` shards, verifies ciphertext integrity, then decrypts locally.
 
-### 7. Repair
+### 9. Repair
 
 Repair starts with an audit pass. Failed shard placements are treated as unavailable. If at least `k` shards can still be fetched, Kryden reconstructs the encrypted object, re-runs erasure coding deterministically, and stores replacement shard indexes on online peers. Repair placement uses peer repair headroom, avoids already-used failure domains where possible, and discounts peers with poor audit history. The content key is not needed for repair.
 
-### 8. Schedule
+### 10. Schedule
 
 A background scheduler tracks manifests in durable SQLite tables, runs audit and repair passes, updates manifests after successful repairs, and accumulates peer health history over time. Each repair cycle commits at one transaction boundary: manifest updates, placement changes, peer health, repair events, normalized scheduler events, trace JSON, metrics JSON, transition status, and run history all commit together or roll back together.
 
-### 9. Membership
+### 11. Membership
 
 Peer runtimes expose signed heartbeats using `kryden-peer-heartbeat-v1`. A heartbeat commits to the peer id, endpoint URL, public peer record, issue time, expiry time, and monotonic sequence. The membership registry bootstraps from seed endpoints, verifies heartbeat signatures against each peer public key, rejects tampered or stale heartbeats, and prunes peers whose heartbeat expiry has passed. Remote swarms can then be created from the active registry view instead of a hardcoded peer list.
 
@@ -52,7 +62,9 @@ Manifests are explicitly versioned with `version: 1`. Clients, audit verificatio
 
 - `MANIFEST_VERSION` gates public object manifests.
 - `PEER_RECORD_VERSION` gates local peer records used for stable simulated identity restore.
+- `DURABLE_SHARD_RECORD_VERSION` gates committed on-disk shard payload records.
 - `REMOTE_PEER_RECORD_VERSION` gates peer-runtime records and signed heartbeat membership.
+- `kryden-peer-request-v1` gates signed runtime requests and replay protection.
 - `kryden-peer-heartbeat-v1` gates signed liveness heartbeats.
 - `SQLITE_STATE_SCHEMA_VERSION` gates the scheduler state database through both `PRAGMA user_version` and the `schema_meta.state_schema_version` row.
 
@@ -62,11 +74,14 @@ SQLite migration discipline is intentionally strict: opening a database with a n
 
 The private secret contains the content key. Production Kryden needs a durable key-management layer: passphrases, social recovery, hardware keys, or wallet-controlled key wrapping.
 
+## Peer Shard Store
+
+Peer runtimes can persist shard payloads under a configured storage directory. Each shard write is staged to a temp file, fsynced, atomically renamed into a committed generation file, and followed by best-effort directory fsync. On startup, the peer removes leftover temp files, scans committed shard records, rebuilds its in-memory index, and garbage-collects older generations for the same object id and shard index.
+
 ## Non-Goals In This Prototype
 
-- No production peer transport; the current transport is a local HTTP peer-runtime boundary for testing process isolation.
+- No production peer transport; the current transport is a local HTTP/HTTPS peer-runtime boundary for testing process isolation.
 - No Sybil resistance.
 - No payment settlement.
 - No distributed production repair daemon.
-- No durable shard persistence across process restarts.
 - No namespace or file-system layer.

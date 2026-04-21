@@ -18,8 +18,10 @@ Status: implemented in this prototype.
 - Add content-addressed shard retrieval over the transport.
 - Persist peer stores on disk.
 - Version manifests, peer records, heartbeats, and scheduler schema before widening the protocol.
+- Exercise hostile distributed runtime conditions.
+- Add optional TLS transport for local peer runtimes.
 
-Status: identity, local peer-record serialization, local audit proofs, a local HTTP peer runtime, signed heartbeat membership, membership expiry, and explicit format/schema version gates are implemented; production transport and durable shard persistence are not.
+Status: identity, local peer-record serialization, local audit proofs, a local HTTP/HTTPS peer runtime, signed runtime request envelopes with nonce replay protection, durable peer-runtime shard storage, signed heartbeat membership, membership expiry, explicit format/schema version gates, and hostile distributed runtime tests are implemented; production transport is not.
 
 ## Milestone 3: Repair And Audit Scheduling
 
@@ -33,10 +35,11 @@ Status: identity, local peer-record serialization, local audit proofs, a local H
 - Combine domain diversity, capacity, repair headroom, audit history, and repair success into placement admission and scoring.
 - Add repair caps, cooldown windows, and degraded-object retry backoff.
 - Add repair/audit metrics, normalized event logs, and replayable scheduler traces.
+- Add operator inspection tools for runs, objects, peers, and degraded state.
 - Anchor audit sampling to public randomness or client-committed randomness.
 - Track peer reliability over time.
 
-Status: local repair, failure-domain placement, capacity headroom, peer-health-aware admission/scoring, anti-thrash scheduler controls, SQLite-backed scheduler transactions, crash-recovery tests, durable state-backed scheduling, and scheduler observability are implemented; public-randomness sampling and durable shard persistence are not.
+Status: local repair, failure-domain placement, capacity headroom, peer-health-aware admission/scoring, anti-thrash scheduler controls, SQLite-backed scheduler transactions, crash-recovery tests, durable state-backed scheduling, scheduler observability, and inspection CLI commands are implemented; public-randomness sampling is not.
 
 ## Milestone 4: Incentives
 

@@ -39,6 +39,42 @@ export interface PeerHealthRecord {
   lastError?: string;
 }
 
+export interface PeerAccountingRecord {
+  peerId: string;
+  publicKeyPem?: string;
+  capacityBytes?: number;
+  reservedBytes?: number;
+  repairHeadroomBytes?: number;
+  usedBytes?: number;
+  allocatableBytes?: number;
+  regularFreeBytes?: number;
+  repairFreeBytes?: number;
+  online?: boolean;
+  failureDomain?: FailureDomain;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface PeerInspectionRecord {
+  peer: PeerAccountingRecord;
+  health: PeerHealthRecord;
+  placements: Array<{
+    contentId: string;
+    shardIndex: number;
+    size: number;
+    checksum: string;
+  }>;
+  repairEvents: Array<{
+    runId: string;
+    contentId: string;
+    shardIndex: number;
+    eventType: "repaired" | "failed";
+    oldPeerId?: string;
+    newPeerId?: string;
+    reason: string;
+  }>;
+}
+
 export interface SchedulerObjectRunRecord {
   contentId: string;
   healthyShards: number;
@@ -162,6 +198,42 @@ interface PeerHealthRow {
   last_error: string | null;
 }
 
+interface PeerRow {
+  peer_id: string;
+  public_key_pem: string | null;
+  capacity_bytes: number | null;
+  reserved_bytes: number | null;
+  repair_headroom_bytes: number | null;
+  used_bytes: number | null;
+  allocatable_bytes: number | null;
+  regular_free_bytes: number | null;
+  repair_free_bytes: number | null;
+  online: number | null;
+  failure_bucket: string | null;
+  device_group: string | null;
+  host: string | null;
+  subnet: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+interface PeerPlacementRow {
+  content_id: string;
+  shard_index: number;
+  size: number;
+  checksum: string;
+}
+
+interface RepairEventRow {
+  run_id: string;
+  content_id: string;
+  shard_index: number;
+  event_type: "repaired" | "failed";
+  old_peer_id: string | null;
+  new_peer_id: string | null;
+  reason: string;
+}
+
 interface SchedulerRunRow {
   run_id: string;
   started_at: string;
@@ -218,6 +290,63 @@ export class SQLiteStateStore {
 
   schemaVersion(): number {
     return this.readSchemaVersion();
+  }
+
+  async getSchedulerRun(runId: string): Promise<SchedulerRunRecord | undefined> {
+    if (runId === "latest") {
+      const row = this.db.prepare(`
+        SELECT * FROM scheduler_runs
+        ORDER BY completed_at DESC, run_id DESC
+        LIMIT 1
+      `).get();
+      return row ? schedulerRunFromRow(row as unknown as SchedulerRunRow) : undefined;
+    }
+
+    const row = this.db.prepare("SELECT * FROM scheduler_runs WHERE run_id = ?").get(runId);
+    return row ? schedulerRunFromRow(row as unknown as SchedulerRunRow) : undefined;
+  }
+
+  async getTrackedObject(contentId: string): Promise<TrackedObjectRecord | undefined> {
+    return this.getTrackedObjectSync(contentId);
+  }
+
+  async getPeerInspection(peerId: string): Promise<PeerInspectionRecord | undefined> {
+    const peerRow = this.db.prepare("SELECT * FROM peers WHERE peer_id = ?").get(peerId);
+    if (!peerRow) {
+      return undefined;
+    }
+
+    const healthRow = this.db.prepare("SELECT * FROM peer_health WHERE peer_id = ?").get(peerId);
+    const placements = this.db.prepare(`
+      SELECT content_id, shard_index, size, checksum
+      FROM shard_placements
+      WHERE peer_id = ?
+      ORDER BY content_id ASC, shard_index ASC
+    `).all(peerId).map((row) => placementFromRow(row as unknown as PeerPlacementRow));
+    const repairEvents = this.db.prepare(`
+      SELECT run_id, content_id, shard_index, event_type, old_peer_id, new_peer_id, reason
+      FROM repair_events
+      WHERE old_peer_id = ? OR new_peer_id = ?
+      ORDER BY run_id ASC, content_id ASC, shard_index ASC
+    `).all(peerId, peerId).map((row) => repairEventFromRow(row as unknown as RepairEventRow));
+
+    return {
+      peer: peerAccountingFromRow(peerRow as unknown as PeerRow),
+      health: healthRow
+        ? peerHealthFromRow(healthRow as unknown as PeerHealthRow)
+        : emptyPeerHealth(peerId),
+      placements,
+      repairEvents
+    };
+  }
+
+  async getDegradedObjects(now = new Date()): Promise<TrackedObjectRecord[]> {
+    return this.db.prepare(`
+      SELECT * FROM manifests
+      WHERE consecutive_degraded_runs > 0
+        OR (next_eligible_at IS NOT NULL AND next_eligible_at > ?)
+      ORDER BY consecutive_degraded_runs DESC, updated_at DESC, content_id ASC
+    `).all(now.toISOString()).map((row) => trackedObjectFromRow(row as unknown as ManifestRow));
   }
 
   async trackObject(manifest: StoredObjectManifest, now = new Date()): Promise<TrackedObjectRecord> {
@@ -1288,6 +1417,61 @@ function peerHealthFromRow(row: PeerHealthRow): PeerHealthRecord {
     lastOkAt: row.last_ok_at ?? undefined,
     lastFailureAt: row.last_failure_at ?? undefined,
     lastError: row.last_error ?? undefined
+  });
+}
+
+function emptyPeerHealth(peerId: string): PeerHealthRecord {
+  return {
+    peerId,
+    auditsPassed: 0,
+    auditsFailed: 0,
+    consecutiveFailures: 0,
+    repairedShards: 0
+  };
+}
+
+function peerAccountingFromRow(row: PeerRow): PeerAccountingRecord {
+  const failureDomain = removeUndefined({
+    bucket: row.failure_bucket ?? undefined,
+    deviceGroup: row.device_group ?? undefined,
+    host: row.host ?? undefined,
+    subnet: row.subnet ?? undefined
+  });
+  return removeUndefined({
+    peerId: row.peer_id,
+    publicKeyPem: row.public_key_pem ?? undefined,
+    capacityBytes: row.capacity_bytes ?? undefined,
+    reservedBytes: row.reserved_bytes ?? undefined,
+    repairHeadroomBytes: row.repair_headroom_bytes ?? undefined,
+    usedBytes: row.used_bytes ?? undefined,
+    allocatableBytes: row.allocatable_bytes ?? undefined,
+    regularFreeBytes: row.regular_free_bytes ?? undefined,
+    repairFreeBytes: row.repair_free_bytes ?? undefined,
+    online: row.online === null ? undefined : Boolean(row.online),
+    failureDomain: failureDomain.bucket ? failureDomain as FailureDomain : undefined,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at
+  });
+}
+
+function placementFromRow(row: PeerPlacementRow): PeerInspectionRecord["placements"][number] {
+  return {
+    contentId: row.content_id,
+    shardIndex: row.shard_index,
+    size: row.size,
+    checksum: row.checksum
+  };
+}
+
+function repairEventFromRow(row: RepairEventRow): PeerInspectionRecord["repairEvents"][number] {
+  return removeUndefined({
+    runId: row.run_id,
+    contentId: row.content_id,
+    shardIndex: row.shard_index,
+    eventType: row.event_type,
+    oldPeerId: row.old_peer_id ?? undefined,
+    newPeerId: row.new_peer_id ?? undefined,
+    reason: row.reason
   });
 }
 

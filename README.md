@@ -17,9 +17,14 @@ This repo currently implements:
 - Peer capacity accounting with allocatable bytes, reserved bytes, and repair headroom.
 - Local peer swarm simulation with deterministic placement and capacity checks.
 - Local HTTP peer runtimes for process-boundary audit, retrieval, and repair tests.
+- Optional durable peer shard stores with temp-file writes, atomic rename, restart index rebuild, and obsolete-generation cleanup.
+- Optional HTTPS peer runtime transport using configured TLS key/certificate material.
 - Signed peer heartbeats with bootstrap discovery and membership expiry.
+- Signed peer request envelopes with timestamp and nonce replay protection for protected runtime operations.
+- Hostile distributed runtime tests for partitions, delayed responses, stale membership, heartbeat replay, and repair-write interruption.
 - Explicit version gates for manifests, peer records, heartbeats, and SQLite state schema.
 - Scheduler observability with metrics, normalized event logs, and replayable run traces.
+- Inspection CLI for scheduler runs, tracked objects, peers, and degraded objects.
 - CLI flows for encoding, decoding, and failure simulation.
 - Tests for shard recovery, tamper detection, and peer-loss reconstruction.
 
@@ -63,13 +68,24 @@ The state database records `SQLITE_STATE_SCHEMA_VERSION` in both `PRAGMA user_ve
 Use `--failure-domains`, `--reserved-bytes`, and `--repair-headroom-bytes` to exercise correlated-risk and capacity-pressure scenarios.
 Use `--max-repairs-per-run`, `--object-cooldown-ms`, and `--degraded-backoff-base-ms` to exercise anti-thrash behavior.
 
+Inspect scheduler state:
+
+```bash
+npx tsx src/cli.ts inspect run latest --state tmp/kryden-scheduler-state.sqlite
+npx tsx src/cli.ts inspect object <content-id> --state tmp/kryden-scheduler-state.sqlite
+npx tsx src/cli.ts inspect peer <peer-id> --state tmp/kryden-scheduler-state.sqlite
+npx tsx src/cli.ts inspect degraded --state tmp/kryden-scheduler-state.sqlite
+```
+
+Inspection output is JSON so it can be piped into scripts or dashboards.
+
 Run a local peer process:
 
 ```bash
-npx tsx src/cli.ts peer-runtime --id peer-1 --capacity-bytes 1048576 --failure-bucket bucket-1
+npx tsx src/cli.ts peer-runtime --id peer-1 --capacity-bytes 1048576 --failure-bucket bucket-1 --storage-dir ./tmp/peer-1 --tls-cert ./cert.pem --tls-key ./key.pem --trusted-authority-id coordinator-1 --trusted-authority-public-key-base64 <base64-pem>
 ```
 
-The peer runtime serves shard storage, retrieval, audits, and signed heartbeats over local HTTP. Tests bootstrap membership from those heartbeat endpoints and build a remote swarm from the active registry view.
+The peer runtime serves shard storage, retrieval, audits, and signed heartbeats over local HTTP or HTTPS. Health, peer records, and heartbeats are public. Shard store, retrieve, audit, repair, and admin operations require a signed `kryden-peer-request-v1` envelope from a configured authority. When `--storage-dir` is provided, shard payloads survive restart and the peer rebuilds its shard index from disk. When `--tls-cert` and `--tls-key` are provided, the peer advertises an `https://` endpoint and serves all routes over TLS. Tests bootstrap membership from heartbeat endpoints and build an authenticated remote swarm from the active registry view.
 
 ## Architecture
 
@@ -106,4 +122,4 @@ docs/             Protocol, threat model, and roadmap
 
 ## Status
 
-The current code proves early invariants: data survives shard loss up to the configured parity budget, online peers can be challenged for signed sampled possession of encrypted shards, failed placements can be repaired without exposing plaintext or client keys, scheduler state survives process exits, placement/repair respect basic failure-domain and capacity constraints, and a remote swarm can audit and repair across separate peer processes discovered through signed membership heartbeats. The next step is to replace the local HTTP runtime with production transport, durable shard storage, and adversarial audit randomness.
+The current code proves early invariants: data survives shard loss up to the configured parity budget, online peers can be challenged for signed sampled possession of encrypted shards, failed placements can be repaired without exposing plaintext or client keys, scheduler state survives process exits, placement/repair respect basic failure-domain and capacity constraints, and a remote swarm can audit and repair across separate peer processes discovered through signed membership heartbeats. Hostile runtime tests now cover partitions, delayed responses, stale membership, replayed heartbeats, and repair-write interruption. The next step is to replace the local HTTP runtime with production transport and adversarial audit randomness.

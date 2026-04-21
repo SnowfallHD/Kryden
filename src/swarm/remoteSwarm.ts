@@ -21,6 +21,13 @@ import type { PeerHeartbeat } from "./membership.js";
 import { rankPeersForShard, type PeerPlacementStats, type PlacementPeer } from "./placement.js";
 import type { RepairOptions, RepairReport, ShardRepair, ShardRepairFailure } from "./repair.js";
 import type { StorePurpose } from "./peer.js";
+import {
+  DEFAULT_PEER_REQUEST_TTL_MS,
+  createSignedPeerRequest,
+  type PeerRequestAuthorityRole,
+  type PeerRequestOperation
+} from "./requestAuth.js";
+import type { PeerIdentity } from "./identity.js";
 
 export interface RemoteKrydenPutResult {
   manifest: StoredObjectManifest;
@@ -33,15 +40,27 @@ interface WireShard {
   data: string;
 }
 
+export interface RemotePeerClientOptions {
+  authority?: PeerIdentity;
+  authorityRole?: PeerRequestAuthorityRole;
+  requestTtlMs?: number;
+}
+
 export class RemotePeerClient {
   readonly url: string;
+  private readonly authority?: PeerIdentity;
+  private readonly authorityRole: PeerRequestAuthorityRole;
+  private readonly requestTtlMs: number;
 
-  constructor(url: string) {
+  constructor(url: string, options: RemotePeerClientOptions = {}) {
     if (!url) {
       throw new Error("Remote peer URL is required");
     }
 
     this.url = url.replace(/\/$/, "");
+    this.authority = options.authority;
+    this.authorityRole = options.authorityRole ?? "coordinator";
+    this.requestTtlMs = options.requestTtlMs ?? DEFAULT_PEER_REQUEST_TTL_MS;
   }
 
   async getRecord(): Promise<RemotePeerRecord> {
@@ -56,7 +75,7 @@ export class RemotePeerClient {
   }
 
   async store(objectId: string, shard: EncodedShard, purpose: StorePurpose = "regular"): Promise<RemotePeerRecord> {
-    const response = await this.request<{ peer: RemotePeerRecord }>("/store", "POST", {
+    const response = await this.protectedRequest<{ peer: RemotePeerRecord }>("/store", purpose === "repair" ? "repair" : "store", {
       objectId,
       shard: shardToWire(shard),
       purpose
@@ -65,7 +84,7 @@ export class RemotePeerClient {
   }
 
   async retrieve(objectId: string, shardIndex: number): Promise<EncodedShard | undefined> {
-    const response = await this.request<{ shard: WireShard | null }>("/retrieve", "POST", {
+    const response = await this.protectedRequest<{ shard: WireShard | null }>("/retrieve", "retrieve", {
       objectId,
       shardIndex
     });
@@ -76,7 +95,7 @@ export class RemotePeerClient {
     challenge: StorageAuditChallenge,
     descriptor: ShardDescriptor
   ): Promise<StorageAuditProof | undefined> {
-    const response = await this.request<{ proof: StorageAuditProof | null }>("/audit", "POST", {
+    const response = await this.protectedRequest<{ proof: StorageAuditProof | null }>("/audit", "audit", {
       challenge,
       descriptor
     });
@@ -84,16 +103,31 @@ export class RemotePeerClient {
   }
 
   async setOnline(online: boolean): Promise<RemotePeerRecord> {
-    const response = await this.request<{ peer: RemotePeerRecord }>("/online", "POST", { online });
+    const response = await this.protectedRequest<{ peer: RemotePeerRecord }>("/online", "admin", { online });
     return response.peer;
   }
 
   async corruptShard(objectId: string, shardIndex: number): Promise<RemotePeerRecord> {
-    const response = await this.request<{ peer: RemotePeerRecord }>("/corrupt", "POST", {
+    const response = await this.protectedRequest<{ peer: RemotePeerRecord }>("/corrupt", "admin", {
       objectId,
       shardIndex
     });
     return response.peer;
+  }
+
+  private async protectedRequest<T>(path: string, operation: PeerRequestOperation, body: unknown): Promise<T> {
+    if (!this.authority) {
+      throw new Error("Remote peer protected request requires a signing authority");
+    }
+
+    return this.request<T>(path, "POST", createSignedPeerRequest({
+      authority: this.authority,
+      authorityRole: this.authorityRole,
+      operation,
+      path,
+      body,
+      ttlMs: this.requestTtlMs
+    }));
   }
 
   private async request<T>(path: string, method: "GET" | "POST", body?: unknown): Promise<T> {
@@ -372,11 +406,22 @@ export class RemoteSwarm {
         continue;
       }
 
-      const updatedRecord = await this.peerClient(replacementPeer.id).store(
-        updatedManifest.contentId,
-        shard,
-        "repair"
-      );
+      let updatedRecord: RemotePeerRecord;
+      try {
+        updatedRecord = await this.peerClient(replacementPeer.id).store(
+          updatedManifest.contentId,
+          shard,
+          "repair"
+        );
+      } catch (error) {
+        failed.push({
+          shardIndex: audit.shardIndex,
+          peerId: replacementPeer.id,
+          reason: error instanceof Error ? error.message : "Repair write failed"
+        });
+        continue;
+      }
+
       const updatedSnapshot = new RemotePeerSnapshot(updatedRecord);
       snapshots.set(updatedSnapshot.id, updatedSnapshot);
       updatedManifest.shards[descriptorIndex] = descriptorForRemoteShard(

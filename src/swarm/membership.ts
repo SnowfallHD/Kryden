@@ -1,5 +1,5 @@
 import type { RemotePeerRecord } from "./peerRuntime.js";
-import { RemotePeerClient, RemoteSwarm } from "./remoteSwarm.js";
+import { RemotePeerClient, RemoteSwarm, type RemotePeerClientOptions } from "./remoteSwarm.js";
 import { signPeerMessage, verifyPeerSignature, type PeerIdentity } from "./identity.js";
 
 export const HEARTBEAT_PROTOCOL = "kryden-peer-heartbeat-v1";
@@ -137,7 +137,7 @@ export class PeerMembershipRegistry {
     }
 
     const existing = this.members.get(heartbeat.peerId);
-    if (existing && heartbeat.sequence < existing.sequence) {
+    if (existing && heartbeat.sequence <= existing.sequence) {
       throw new Error(`Stale heartbeat from ${heartbeat.peerId}`);
     }
 
@@ -174,13 +174,20 @@ export class PeerMembershipRegistry {
       .map(cloneEntry);
   }
 
-  createRemoteSwarm(now = new Date()): RemoteSwarm {
+  createRemoteSwarm(options?: RemotePeerClientOptions, now?: Date): RemoteSwarm;
+  createRemoteSwarm(now?: Date): RemoteSwarm;
+  createRemoteSwarm(
+    optionsOrNow?: RemotePeerClientOptions | Date,
+    maybeNow = new Date()
+  ): RemoteSwarm {
+    const options = optionsOrNow instanceof Date ? undefined : optionsOrNow;
+    const now = optionsOrNow instanceof Date ? optionsOrNow : maybeNow;
     const active = this.getActiveMembers(now);
     if (active.length === 0) {
       throw new Error("No active peers in membership registry");
     }
 
-    return new RemoteSwarm(active.map((entry) => new RemotePeerClient(entry.endpoint)));
+    return new RemoteSwarm(active.map((entry) => new RemotePeerClient(entry.endpoint, options)));
   }
 }
 
