@@ -1,0 +1,21 @@
+# Repair
+
+Kryden repair is intentionally plaintext-blind.
+
+1. Audit every shard placement in the manifest.
+2. Treat failed audits as unavailable placements.
+3. Fetch surviving encrypted shards.
+4. If at least `k` shards are available, reconstruct the encrypted object.
+5. Re-run Reed-Solomon encoding with the same erasure configuration.
+6. Store replacement shard indexes on online peers.
+7. Return an updated manifest with new peer public keys and Merkle commitments.
+
+The repair worker does not need the client content key. That means a future storage coordinator can restore redundancy without gaining the ability to decrypt user data.
+
+## Current Limits
+
+- Repair runs synchronously in the local simulator.
+- Failed peers keep their stale in-memory shard data, but the updated manifest stops pointing at them.
+- Peer identities can be exported and restored; shard payloads are not persisted to disk yet.
+- There is no reputation penalty, collateral, or automatic repair scheduler yet.
+

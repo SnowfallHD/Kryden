@@ -1,0 +1,316 @@
+import type { EncodedShard } from "../erasure/reedSolomon.js";
+import { decodeErasure, encodeErasure } from "../erasure/reedSolomon.js";
+import type { ShardDescriptor, StoredObjectManifest } from "../storage/manifest.js";
+import { buildMerkleTree, DEFAULT_MERKLE_LEAF_SIZE } from "../storage/merkle.js";
+import {
+  createStorageAuditChallenge,
+  verifyStorageAuditProof,
+  type StorageAuditResult
+} from "./audit.js";
+import { PeerStore } from "./peer.js";
+import type { LocalPeerRecord } from "./peer.js";
+import { rankPeersForShard } from "./placement.js";
+import type { RepairReport, ShardRepair, ShardRepairFailure } from "./repair.js";
+
+export class LocalSwarm {
+  readonly peers: PeerStore[];
+
+  constructor(peers: readonly PeerStore[]) {
+    if (peers.length === 0) {
+      throw new Error("LocalSwarm requires at least one peer");
+    }
+
+    const ids = new Set(peers.map((peer) => peer.id));
+    if (ids.size !== peers.length) {
+      throw new Error("Peer ids must be unique");
+    }
+
+    this.peers = [...peers];
+  }
+
+  storeObjectShards(objectId: string, shards: readonly EncodedShard[]): ShardDescriptor[] {
+    const descriptors: ShardDescriptor[] = [];
+    const usedPeerIds = new Set<string>();
+
+    for (const shard of shards) {
+      let candidates = rankPeersForShard(
+        objectId,
+        shard.index,
+        this.peers,
+        shard.data.length,
+        usedPeerIds
+      );
+
+      if (candidates.length === 0) {
+        candidates = rankPeersForShard(objectId, shard.index, this.peers, shard.data.length);
+      }
+
+      const peer = candidates[0];
+      if (!peer) {
+        throw new Error(`No peer can store shard ${shard.index}`);
+      }
+
+      const descriptor = this.storeShardOnPeer(objectId, shard, peer);
+      usedPeerIds.add(peer.id);
+      descriptors.push(descriptor);
+    }
+
+    return descriptors;
+  }
+
+  fetchObjectShards(manifest: StoredObjectManifest): EncodedShard[] {
+    const out: EncodedShard[] = [];
+    for (const descriptor of manifest.shards) {
+      const peer = this.peers.find((candidate) => candidate.id === descriptor.peerId);
+      const shard = peer?.retrieve(manifest.contentId, descriptor.index);
+      if (!shard) {
+        continue;
+      }
+
+      out.push({
+        index: descriptor.index,
+        data: shard.data,
+        checksum: descriptor.checksum
+      });
+    }
+
+    return out;
+  }
+
+  setPeerOnline(peerId: string, online: boolean): void {
+    const peer = this.peers.find((candidate) => candidate.id === peerId);
+    if (!peer) {
+      throw new Error(`Unknown peer ${peerId}`);
+    }
+
+    peer.online = online;
+  }
+
+  offlinePeerIds(): string[] {
+    return this.peers.filter((peer) => !peer.online).map((peer) => peer.id);
+  }
+
+  auditObject(manifest: StoredObjectManifest, sampleCount = 3): StorageAuditResult[] {
+    return manifest.shards.map((descriptor) => {
+      const peer = this.peers.find((candidate) => candidate.id === descriptor.peerId);
+      if (!peer) {
+        return {
+          shardIndex: descriptor.index,
+          peerId: descriptor.peerId,
+          ok: false,
+          error: "Peer not found"
+        };
+      }
+
+      try {
+        const challenge = createStorageAuditChallenge(descriptor, manifest.contentId, sampleCount);
+        const proof = peer.respondToAudit(challenge, descriptor);
+        if (!proof) {
+          return {
+            shardIndex: descriptor.index,
+            peerId: descriptor.peerId,
+            ok: false,
+            error: "Peer did not return a proof",
+            challenge
+          };
+        }
+
+        const ok = verifyStorageAuditProof(manifest, descriptor, challenge, proof);
+        return {
+          shardIndex: descriptor.index,
+          peerId: descriptor.peerId,
+          ok,
+          error: ok ? undefined : "Invalid storage proof",
+          challenge,
+          proof
+        };
+      } catch (error) {
+        return {
+          shardIndex: descriptor.index,
+          peerId: descriptor.peerId,
+          ok: false,
+          error: error instanceof Error ? error.message : "Unknown audit error"
+        };
+      }
+    });
+  }
+
+  repairObject(manifest: StoredObjectManifest, sampleCount = 3): RepairReport<StoredObjectManifest> {
+    const audits = this.auditObject(manifest, sampleCount);
+    const failedAudits = audits.filter((audit) => !audit.ok);
+    const healthyShards = audits.length - failedAudits.length;
+
+    if (failedAudits.length === 0) {
+      return {
+        updatedManifest: cloneManifest(manifest),
+        audits,
+        repaired: [],
+        failed: [],
+        healthyShards,
+        requiredShards: manifest.erasure.dataShards
+      };
+    }
+
+    const failedShardIndexes = new Set(failedAudits.map((audit) => audit.shardIndex));
+    const availableShards = this.fetchObjectShards(manifest).filter(
+      (shard) => !failedShardIndexes.has(shard.index)
+    );
+    if (availableShards.length < manifest.erasure.dataShards) {
+      return {
+        updatedManifest: cloneManifest(manifest),
+        audits,
+        repaired: [],
+        failed: failedAudits.map((audit) => ({
+          shardIndex: audit.shardIndex,
+          peerId: audit.peerId,
+          reason: `Only ${availableShards.length} shards available; need ${manifest.erasure.dataShards}`
+        })),
+        healthyShards,
+        requiredShards: manifest.erasure.dataShards
+      };
+    }
+
+    const ciphertext = decodeErasure(availableShards, manifest.erasure);
+    const encoded = encodeErasure(ciphertext, {
+      dataShards: manifest.erasure.dataShards,
+      parityShards: manifest.erasure.parityShards
+    });
+    const updatedManifest = cloneManifest(manifest);
+    const repaired: ShardRepair[] = [];
+    const failed: ShardRepairFailure[] = [];
+    const assignedPeerIds = new Set(updatedManifest.shards.map((descriptor) => descriptor.peerId));
+
+    for (const audit of failedAudits) {
+      const shard = encoded.shards.find((candidate) => candidate.index === audit.shardIndex);
+      const descriptorIndex = updatedManifest.shards.findIndex(
+        (candidate) => candidate.index === audit.shardIndex
+      );
+
+      if (!shard || descriptorIndex === -1) {
+        failed.push({
+          shardIndex: audit.shardIndex,
+          peerId: audit.peerId,
+          reason: "Shard is missing from reconstructed object"
+        });
+        continue;
+      }
+
+      const oldDescriptor = updatedManifest.shards[descriptorIndex];
+      const oldPeerId = oldDescriptor.peerId;
+      assignedPeerIds.delete(oldPeerId);
+
+      const avoidPeers = new Set(assignedPeerIds);
+      avoidPeers.add(oldPeerId);
+      const replacementPeer = this.chooseReplacementPeer(
+        updatedManifest.contentId,
+        shard,
+        avoidPeers,
+        oldPeerId
+      );
+
+      if (!replacementPeer) {
+        assignedPeerIds.add(oldPeerId);
+        failed.push({
+          shardIndex: audit.shardIndex,
+          peerId: oldPeerId,
+          reason: "No online peer had enough free capacity for repair"
+        });
+        continue;
+      }
+
+      const newDescriptor = this.storeShardOnPeer(updatedManifest.contentId, shard, replacementPeer);
+      updatedManifest.shards[descriptorIndex] = newDescriptor;
+      assignedPeerIds.add(replacementPeer.id);
+      repaired.push({
+        shardIndex: audit.shardIndex,
+        oldPeerId,
+        newPeerId: replacementPeer.id,
+        reason: audit.error ?? "Audit failed"
+      });
+    }
+
+    updatedManifest.shards.sort((left, right) => left.index - right.index);
+
+    return {
+      updatedManifest,
+      audits,
+      repaired,
+      failed,
+      healthyShards,
+      requiredShards: manifest.erasure.dataShards
+    };
+  }
+
+  toPeerRecords(): LocalPeerRecord[] {
+    return this.peers.map((peer) => peer.toRecord());
+  }
+
+  private chooseReplacementPeer(
+    objectId: string,
+    shard: EncodedShard,
+    preferredAvoidPeerIds: ReadonlySet<string>,
+    oldPeerId: string
+  ): PeerStore | undefined {
+    const preferred = rankPeersForShard(
+      objectId,
+      shard.index,
+      this.peers,
+      shard.data.length,
+      preferredAvoidPeerIds
+    )[0];
+
+    if (preferred) {
+      return preferred;
+    }
+
+    return rankPeersForShard(
+      objectId,
+      shard.index,
+      this.peers,
+      shard.data.length,
+      new Set([oldPeerId])
+    )[0];
+  }
+
+  private storeShardOnPeer(objectId: string, shard: EncodedShard, peer: PeerStore): ShardDescriptor {
+    peer.store(objectId, shard);
+    const tree = buildMerkleTree(shard.data, DEFAULT_MERKLE_LEAF_SIZE);
+    return {
+      index: shard.index,
+      peerId: peer.id,
+      peerPublicKey: peer.publicKeyPem,
+      size: shard.data.length,
+      checksum: shard.checksum,
+      merkleRoot: tree.root,
+      merkleLeafSize: tree.leafSize,
+      merkleLeafCount: tree.leafCount
+    };
+  }
+}
+
+export function createLocalSwarm(peerCount: number, capacityBytes: number): LocalSwarm {
+  if (!Number.isInteger(peerCount) || peerCount <= 0) {
+    throw new Error("peerCount must be a positive integer");
+  }
+
+  return new LocalSwarm(
+    Array.from({ length: peerCount }, (_, index) => new PeerStore(`peer-${index + 1}`, capacityBytes))
+  );
+}
+
+export function createLocalSwarmFromRecords(records: readonly LocalPeerRecord[]): LocalSwarm {
+  if (records.length === 0) {
+    throw new Error("At least one peer record is required");
+  }
+
+  return new LocalSwarm(records.map((record) => PeerStore.fromRecord(record)));
+}
+
+function cloneManifest(manifest: StoredObjectManifest): StoredObjectManifest {
+  return {
+    ...manifest,
+    encryption: { ...manifest.encryption },
+    erasure: { ...manifest.erasure },
+    shards: manifest.shards.map((descriptor) => ({ ...descriptor }))
+  };
+}

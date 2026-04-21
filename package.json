@@ -1,0 +1,33 @@
+{
+  "name": "kryden",
+  "version": "0.1.0",
+  "description": "Prototype primitives for a decentralized storage network.",
+  "type": "module",
+  "private": true,
+  "main": "./dist/kryden.js",
+  "types": "./dist/kryden.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/kryden.d.ts",
+      "import": "./dist/kryden.js"
+    }
+  },
+  "bin": {
+    "kryden": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "demo": "tsx src/cli.ts simulate --size 1048576 --peers 12 --data-shards 6 --parity-shards 3 --fail-peers 3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.15"
+  }
+}
