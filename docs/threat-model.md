@@ -9,6 +9,7 @@
 - **Sampled possession audits:** Online peers can sign Merkle leaf samples for stored encrypted shards.
 - **Peer proof attribution:** Audit signatures bind the proof transcript to the peer public key in the manifest.
 - **Plaintext-safe repair:** Failed placements can be repaired from encrypted shards without requiring the client content key.
+- **Durable maintenance memory:** Scheduler state records tracked manifests, run history, and peer health across process exits.
 
 ## Not Yet Protected
 
@@ -18,6 +19,7 @@
 - **Economic griefing:** No collateral, reputation, or pricing model exists yet.
 - **Challenge grinding:** Audit sampling is local and not yet anchored to public randomness.
 - **Shard durability across restarts:** Peer identities can be serialized, but shard payloads are still in-memory only.
+- **State confidentiality:** Scheduler state includes manifests and peer health; production needs access controls and integrity checks around the state store.
 - **Traffic analysis:** The local simulator does not hide access patterns.
 - **Malicious clients:** Quotas, abuse controls, and spam resistance are not implemented.
 

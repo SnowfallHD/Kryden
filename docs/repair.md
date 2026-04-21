@@ -9,6 +9,7 @@ Kryden repair is intentionally plaintext-blind.
 5. Re-run Reed-Solomon encoding with the same erasure configuration.
 6. Store replacement shard indexes on online peers.
 7. Return an updated manifest with new peer public keys and Merkle commitments.
+8. Persist scheduler run history and peer health changes when repair is scheduler-driven.
 
 The repair worker does not need the client content key. That means a future storage coordinator can restore redundancy without gaining the ability to decrypt user data.
 
@@ -17,5 +18,5 @@ The repair worker does not need the client content key. That means a future stor
 - Repair runs synchronously in the local simulator.
 - Failed peers keep their stale in-memory shard data, but the updated manifest stops pointing at them.
 - Peer identities can be exported and restored; shard payloads are not persisted to disk yet.
-- There is no reputation penalty, collateral, or automatic repair scheduler yet.
+- There is no reputation penalty or collateral yet.
 

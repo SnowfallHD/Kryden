@@ -32,6 +32,10 @@ The client requests shard descriptors from the manifest, verifies shard checksum
 
 Repair starts with an audit pass. Failed shard placements are treated as unavailable. If at least `k` shards can still be fetched, Kryden reconstructs the encrypted object, re-runs erasure coding deterministically, and stores replacement shard indexes on online peers. The content key is not needed for repair.
 
+### 8. Schedule
+
+A background scheduler tracks manifests in a durable JSON state file, runs audit and repair passes, updates manifests after successful repairs, and accumulates peer health history over time. This creates the first feedback loop needed for future reputation and incentive accounting.
+
 ## Public Manifest
 
 The manifest may be stored publicly because it only contains object metadata, encrypted payload metadata, shard checksums, Merkle commitments, peer public keys, and peer placement descriptors. It does not contain the content key.
@@ -45,6 +49,6 @@ The private secret contains the content key. Production Kryden needs a durable k
 - No production peer transport.
 - No Sybil resistance.
 - No payment settlement.
-- No background churn repair daemon.
+- No distributed production repair daemon.
 - No durable shard persistence across process restarts.
 - No namespace or file-system layer.

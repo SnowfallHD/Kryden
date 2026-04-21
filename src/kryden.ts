@@ -57,5 +57,17 @@ export { createPeerIdentity } from "./swarm/identity.js";
 export { createStorageAuditChallenge, verifyStorageAuditProof } from "./swarm/audit.js";
 export type { LocalPeerRecord } from "./swarm/peer.js";
 export type { RepairReport, ShardRepair, ShardRepairFailure } from "./swarm/repair.js";
+export { BackgroundRepairScheduler } from "./scheduler/backgroundRepairScheduler.js";
+export { JsonStateStore } from "./state/store.js";
+export type {
+  BackgroundRepairSchedulerOptions,
+  SchedulerRunSummary
+} from "./scheduler/backgroundRepairScheduler.js";
+export type {
+  KrydenStateSnapshot,
+  PeerHealthRecord,
+  SchedulerRunRecord,
+  TrackedObjectRecord
+} from "./state/store.js";
 export { decodeErasure, encodeErasure } from "./erasure/reedSolomon.js";
 export { decryptPayload, encryptPayload } from "./crypto/envelope.js";

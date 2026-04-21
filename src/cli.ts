@@ -6,7 +6,14 @@ import { parseArgs } from "node:util";
 
 import { decryptPayload, encryptPayload } from "./crypto/envelope.js";
 import { decodeErasure, encodeErasure, type EncodedShard } from "./erasure/reedSolomon.js";
-import { KrydenClient, createLocalSwarm, type ClientSecret, type StoredObjectManifest } from "./kryden.js";
+import {
+  BackgroundRepairScheduler,
+  JsonStateStore,
+  KrydenClient,
+  createLocalSwarm,
+  type ClientSecret,
+  type StoredObjectManifest
+} from "./kryden.js";
 
 const command = process.argv[2];
 const commandArgs = process.argv.slice(3);
@@ -24,6 +31,11 @@ async function main(): Promise<void> {
 
   if (command === "simulate") {
     await simulateCommand(commandArgs);
+    return;
+  }
+
+  if (command === "simulate-scheduler") {
+    await simulateSchedulerCommand(commandArgs);
     return;
   }
 
@@ -204,6 +216,67 @@ async function simulateCommand(args: string[]): Promise<void> {
   }
 }
 
+async function simulateSchedulerCommand(args: string[]): Promise<void> {
+  const parsed = parseArgs({
+    args,
+    options: {
+      size: { type: "string", default: "1048576" },
+      peers: { type: "string", default: "12" },
+      "data-shards": { type: "string", default: "6" },
+      "parity-shards": { type: "string", default: "3" },
+      "fail-peers": { type: "string", default: "3" },
+      state: { type: "string", default: "tmp/kryden-scheduler-state.json" },
+      "sample-count": { type: "string", default: "3" }
+    }
+  });
+
+  const size = parsePositiveInteger(parsed.values.size, "size");
+  const peers = parsePositiveInteger(parsed.values.peers, "peers");
+  const dataShards = parsePositiveInteger(parsed.values["data-shards"], "data-shards");
+  const parityShards = parsePositiveInteger(parsed.values["parity-shards"], "parity-shards");
+  const failPeers = parsePositiveInteger(parsed.values["fail-peers"], "fail-peers");
+  const sampleCount = parsePositiveInteger(parsed.values["sample-count"], "sample-count");
+  const statePath = requireString(parsed.values.state, "state");
+
+  const plaintext = randomBytes(size);
+  const swarm = createLocalSwarm(peers, size * 2);
+  const client = new KrydenClient(swarm);
+  const store = new JsonStateStore(statePath);
+  const scheduler = new BackgroundRepairScheduler(swarm, store, { sampleCount });
+  const stored = client.put(plaintext, { dataShards, parityShards });
+
+  await scheduler.trackObject(stored.manifest);
+
+  for (const descriptor of stored.manifest.shards.slice(0, failPeers)) {
+    swarm.setPeerOnline(descriptor.peerId, false);
+  }
+
+  const summary = await scheduler.runOnce();
+  const state = await store.load();
+  const persistedObject = state.objects[stored.manifest.contentId];
+  const recovered = client.get(persistedObject.manifest, stored.secret);
+  const postRepairAudits = client.audit(persistedObject.manifest, sampleCount);
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: recovered.equals(plaintext),
+        statePath,
+        offlinePeers: swarm.offlinePeerIds(),
+        run: summary.run,
+        trackedObjects: Object.keys(state.objects).length,
+        peerHealth: state.peers,
+        postRepairAudits: {
+          passing: postRepairAudits.filter((audit) => audit.ok).length,
+          total: postRepairAudits.length
+        }
+      },
+      null,
+      2
+    )
+  );
+}
+
 function parsePositiveInteger(value: string | boolean | undefined, name: string): number {
   if (typeof value !== "string") {
     throw new Error(`${name} must be provided`);
@@ -217,6 +290,14 @@ function parsePositiveInteger(value: string | boolean | undefined, name: string)
   return parsed;
 }
 
+function requireString(value: string | boolean | undefined, name: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`${name} must be provided`);
+  }
+
+  return value;
+}
+
 async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -228,6 +309,7 @@ Usage:
   kryden encode <input> --out <directory> [--data-shards 6] [--parity-shards 3]
   kryden decode <object-directory> --out <file>
   kryden simulate [--size 1048576] [--peers 12] [--data-shards 6] [--parity-shards 3] [--fail-peers 3] [--skip-repair]
+  kryden simulate-scheduler [--state tmp/kryden-scheduler-state.json] [--sample-count 3]
 `);
 }
 
